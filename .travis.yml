@@ -54,7 +54,8 @@ before_install:
 
 install:
   - echo "\n" | ./configure
-  - bazel build -c opt --config=cuda //tensorflow/cc:tutorials_example_trainer
+  - bazel build -c opt //tensorflow/cc:tutorials_example_trainer
+
+
+script:
   - bazel-bin/tensorflow/cc/tutorials_example_trainer --use_gpu
-
-
