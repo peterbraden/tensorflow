@@ -58,4 +58,4 @@ install:
 
 
 script:
-  - bazel-bin/tensorflow/cc/tutorials_example_trainer --use_gpu
+  - bazel-bin/tensorflow/cc/tutorials_example_trainer
