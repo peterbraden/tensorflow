@@ -54,8 +54,7 @@ before_install:
 
 install:
   - echo "\n" | ./configure
-  - bazel build -c opt //tensorflow/cc:tutorials_example_trainer
-
+  - bazel build -c opt //tensorflow/...
 
 script:
-  - bazel-bin/tensorflow/cc/tutorials_example_trainer
+  - bazel test //tensorflow/...
