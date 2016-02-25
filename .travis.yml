@@ -24,6 +24,7 @@ addons:
       - zip
       - zlib1g-dev
       - python-numpy
+      - swig
 
 before_install:
   - sudo apt-get install gcc-4.9 g++-4.9 cpp-4.9
