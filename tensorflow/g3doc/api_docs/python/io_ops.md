@@ -50,6 +50,26 @@ with tf.Session() as sess:
   evaluated directly.
 
 
+- - -
+
+### `tf.placeholder_with_default(input, shape, name=None)` {#placeholder_with_default}
+
+A placeholder op that passes though `input` when its output is not fed.
+
+##### Args:
+
+
+*  <b>`input`</b>: A `Tensor`. The default value to produce when `output` is not fed.
+*  <b>`shape`</b>: A `tf.TensorShape` or list of `ints`.
+    The (possibly partial) shape of the tensor.
+*  <b>`name`</b>: A name for the operation (optional).
+
+##### Returns:
+
+  A `Tensor`. Has the same type as `input`.
+  A placeholder tensor that defaults to `input` if it is not fed.
+
+
 
 ## Readers
 
@@ -1417,7 +1437,7 @@ until the element has been enqueued.
 
 #### `tf.QueueBase.enqueue_many(vals, name=None)` {#QueueBase.enqueue_many}
 
-Enqueues zero or elements to this queue.
+Enqueues zero or more elements to this queue.
 
 This operation slices each component tensor along the 0th dimension to
 make multiple queue elements. All of the tensors in `vals` must have the
@@ -1468,8 +1488,8 @@ This operation concatenates queue-element component tensors along
 the 0th dimension to make a single component tensor.  All of the
 components in the dequeued tuple will have size `n` in the 0th dimension.
 
-If the queue contains fewer than `n` elements when this operation
-executes, it will block until `n` elements have been dequeued.
+If the queue is closed and there are less than `n` elements left, then an
+`OutOfRange` exception is raised.
 
 ##### Args:
 
@@ -1546,6 +1566,37 @@ Constructs a queue object from a queue reference.
     as dtypes.  If the shape of any tensors in the element are constrained,
     all must be; shapes can be None if the shapes should not be constrained.
 *  <b>`queue_ref`</b>: The queue reference, i.e. the output of the queue op.
+
+
+- - -
+
+#### `tf.QueueBase.dequeue_up_to(n, name=None)` {#QueueBase.dequeue_up_to}
+
+Dequeues and concatenates `n` elements from this queue.
+
+**Note** This operation is not supported by all queues.  If a queue does not
+support DequeueUpTo, then an Unimplemented exception is raised.
+
+This operation concatenates queue-element component tensors along the
+0th dimension to make a single component tensor.  All of the components
+in the dequeued tuple will have size `n` in the 0th dimension.
+
+If the queue is closed and there are more than `0` but less than `n`
+elements remaining, then instead of raising an `OutOfRange` exception like
+`dequeue_many`, the remaining elements are returned immediately.
+If the queue is closed and there are `0` elements left in the queue, then
+an `OutOfRange` exception is raised just like in `dequeue_many`.
+Otherwise the behavior is identical to `dequeue_many`:
+
+##### Args:
+
+
+*  <b>`n`</b>: A scalar `Tensor` containing the number of elements to dequeue.
+*  <b>`name`</b>: A name for the operation (optional).
+
+##### Returns:
+
+  The tuple of concatenated tensors that was dequeued.
 
 
 - - -
@@ -1788,7 +1839,48 @@ Returns tensor `num_epochs` times and then raises an `OutOfRange` error.
 
 - - -
 
-### `tf.train.range_input_producer(limit, num_epochs=None, shuffle=True, seed=None, capacity=32, name=None)` {#range_input_producer}
+### `tf.train.input_producer(input_tensor, element_shape=None, num_epochs=None, shuffle=True, seed=None, capacity=32, shared_name=None, summary_name=None, name=None)` {#input_producer}
+
+Output the rows of `input_tensor` to a queue for an input pipeline.
+
+##### Args:
+
+
+*  <b>`input_tensor`</b>: A tensor with the rows to produce. Must be at
+    one-dimensional. Must either have a fully-defined shape, or
+    `element_shape` must be defined.
+*  <b>`element_shape`</b>: (Optional.) A `TensorShape` representing the shape of a
+    row of `input_tensor`, if it cannot be inferred.
+*  <b>`num_epochs`</b>: (Optional.) An integer. If specified `input_producer` produces
+    each row of `input_tensor` `num_epochs` times before generating an
+    `OutOfRange` error. If not specified, `input_producer` can cycle through
+    the rows of `input_tensor` an unlimited number of times.
+*  <b>`shuffle`</b>: (Optional.) A boolean. If true, the rows are randomly shuffled
+    within each eopch.
+*  <b>`seed`</b>: (Optional.) An integer. The seed to use if `shuffle` is true.
+*  <b>`capacity`</b>: (Optional.) The capacity of the queue to be used for buffering
+    the input.
+*  <b>`shared_name`</b>: (Optional.) If set, this queue will be shared under the given
+    name across multiple sessions.
+*  <b>`summary_name`</b>: (Optional.) If set, a scalar summary for the current queue
+    size will be generated, using this name as part of the tag.
+*  <b>`name`</b>: (Optional.) A name for queue.
+
+##### Returns:
+
+  A queue with the output rows.  A `QueueRunner` for the queue is
+  added to the current `QUEUE_RUNNER` collection of the current
+  graph.
+
+##### Raises:
+
+
+*  <b>`ValueError`</b>: If the shape of the input cannot be inferred from the arguments.
+
+
+- - -
+
+### `tf.train.range_input_producer(limit, num_epochs=None, shuffle=True, seed=None, capacity=32, shared_name=None, name=None)` {#range_input_producer}
 
 Produces the integers from 0 to limit-1 in a queue.
 
@@ -1804,6 +1896,8 @@ Produces the integers from 0 to limit-1 in a queue.
     epoch.
 *  <b>`seed`</b>: An integer (optional). Seed used if shuffle == True.
 *  <b>`capacity`</b>: An integer. Sets the queue capacity.
+*  <b>`shared_name`</b>: (optional). If set, this queue will be shared under the given
+    name across multiple sessions.
 *  <b>`name`</b>: A name for the operations (optional).
 
 ##### Returns:
@@ -1814,7 +1908,7 @@ Produces the integers from 0 to limit-1 in a queue.
 
 - - -
 
-### `tf.train.slice_input_producer(tensor_list, num_epochs=None, shuffle=True, seed=None, capacity=32, name=None)` {#slice_input_producer}
+### `tf.train.slice_input_producer(tensor_list, num_epochs=None, shuffle=True, seed=None, capacity=32, shared_name=None, name=None)` {#slice_input_producer}
 
 Produces a slice of each `Tensor` in `tensor_list`.
 
@@ -1834,6 +1928,8 @@ is added to the current `Graph`'s `QUEUE_RUNNER` collection.
     epoch.
 *  <b>`seed`</b>: An integer (optional). Seed used if shuffle == True.
 *  <b>`capacity`</b>: An integer. Sets the queue capacity.
+*  <b>`shared_name`</b>: (optional). If set, this queue will be shared under the given
+    name across multiple sessions.
 *  <b>`name`</b>: A name for the operations (optional).
 
 ##### Returns:
@@ -1850,7 +1946,7 @@ is added to the current `Graph`'s `QUEUE_RUNNER` collection.
 
 - - -
 
-### `tf.train.string_input_producer(string_tensor, num_epochs=None, shuffle=True, seed=None, capacity=32, name=None)` {#string_input_producer}
+### `tf.train.string_input_producer(string_tensor, num_epochs=None, shuffle=True, seed=None, capacity=32, shared_name=None, name=None)` {#string_input_producer}
 
 Output strings (e.g. filenames) to a queue for an input pipeline.
 
@@ -1860,13 +1956,15 @@ Output strings (e.g. filenames) to a queue for an input pipeline.
 *  <b>`string_tensor`</b>: A 1-D string tensor with the strings to produce.
 *  <b>`num_epochs`</b>: An integer (optional). If specified, `string_input_producer`
     produces each string from `string_tensor` `num_epochs` times before
-    generating an OutOfRange error. If not specified, `string_input_producer`
-    can cycle through the strings in `string_tensor` an unlimited number of
-    times.
+    generating an `OutOfRange` error. If not specified,
+    `string_input_producer` can cycle through the strings in `string_tensor`
+    an unlimited number of times.
 *  <b>`shuffle`</b>: Boolean. If true, the strings are randomly shuffled within each
     epoch.
 *  <b>`seed`</b>: An integer (optional). Seed used if shuffle == True.
 *  <b>`capacity`</b>: An integer. Sets the queue capacity.
+*  <b>`shared_name`</b>: (optional). If set, this queue will be shared under the given
+    name across multiple sessions.
 *  <b>`name`</b>: A name for the operations (optional).
 
 ##### Returns:
@@ -1904,7 +2002,7 @@ want them run by *N* threads.
 
 - - -
 
-### `tf.train.batch(tensor_list, batch_size, num_threads=1, capacity=32, enqueue_many=False, shapes=None, name=None)` {#batch}
+### `tf.train.batch(tensor_list, batch_size, num_threads=1, capacity=32, enqueue_many=False, shapes=None, dynamic_pad=False, shared_name=None, name=None)` {#batch}
 
 Creates batches of tensors in `tensor_list`.
 
@@ -1928,10 +2026,18 @@ operation is feeding another input queue, its queue runner will catch
 this exception, however, if this operation is used in your main thread
 you are responsible for catching this yourself.
 
-*N.B.:* You must ensure that either (i) the `shapes` argument is
-passed, or (ii) all of the tensors in `tensor_list` must have
-fully-defined shapes. `ValueError` will be raised if neither of
-these conditions holds.
+*N.B.:* If `dynamic_pad` is `False`, you must ensure that either
+(i) the `shapes` argument is passed, or (ii) all of the tensors in
+`tensor_list` must have fully-defined shapes. `ValueError` will be
+raised if neither of these conditions holds.
+
+If `dynamic_pad` is `True`, it is sufficient that the *rank* of the
+tensors is known, but individual dimensions may have shape `None`.
+In this case, for each enqueue the dimensions with value `None`
+may have a variable length; upon dequeue, the output tensors will be padded
+on the right to the maximum shape of the tensors in the current minibatch.
+For numbers, this padding takes value 0.  For strings, this padding is
+the empty string.  See `PaddingFIFOQueue` for more info.
 
 ##### Args:
 
@@ -1943,6 +2049,11 @@ these conditions holds.
 *  <b>`enqueue_many`</b>: Whether each tensor in `tensor_list` is a single example.
 *  <b>`shapes`</b>: (Optional) The shapes for each example.  Defaults to the
     inferred shapes for `tensor_list`.
+*  <b>`dynamic_pad`</b>: Boolean.  Allow variable dimensions in input shapes.
+    The given dimensions are padded upon dequeue so that tensors within a
+    batch have the same shapes.
+*  <b>`shared_name`</b>: (optional). If set, this queue will be shared under the given
+    name across multiple sessions.
 *  <b>`name`</b>: (Optional) A name for the operations.
 
 ##### Returns:
@@ -1958,7 +2069,7 @@ these conditions holds.
 
 - - -
 
-### `tf.train.batch_join(tensor_list_list, batch_size, capacity=32, enqueue_many=False, shapes=None, name=None)` {#batch_join}
+### `tf.train.batch_join(tensor_list_list, batch_size, capacity=32, enqueue_many=False, shapes=None, dynamic_pad=False, shared_name=None, name=None)` {#batch_join}
 
 Runs a list of tensors to fill a queue to create batches of examples.
 
@@ -1992,10 +2103,18 @@ operation is feeding another input queue, its queue runner will catch
 this exception, however, if this operation is used in your main thread
 you are responsible for catching this yourself.
 
-*N.B.:* You must ensure that either (i) the `shapes` argument is
-passed, or (ii) all of the tensors in `tensor_list_list` must have
-fully-defined shapes. `ValueError` will be raised if neither of
-these conditions holds.
+*N.B.:* If `dynamic_pad` is `False`, you must ensure that either
+(i) the `shapes` argument is passed, or (ii) all of the tensors in
+`tensor_list` must have fully-defined shapes. `ValueError` will be
+raised if neither of these conditions holds.
+
+If `dynamic_pad` is `True`, it is sufficient that the *rank* of the
+tensors is known, but individual dimensions may have value `None`.
+In this case, for each enqueue the dimensions with value `None`
+may have a variable length; upon dequeue, the output tensors will be padded
+on the right to the maximum shape of the tensors in the current minibatch.
+For numbers, this padding takes value 0.  For strings, this padding is
+the empty string.  See `PaddingFIFOQueue` for more info.
 
 ##### Args:
 
@@ -2007,6 +2126,11 @@ these conditions holds.
     example.
 *  <b>`shapes`</b>: (Optional) The shapes for each example.  Defaults to the
     inferred shapes for `tensor_list_list[i]`.
+*  <b>`dynamic_pad`</b>: Boolean.  Allow variable dimensions in input shapes.
+    The given dimensions are padded upon dequeue so that tensors within a
+    batch have the same shapes.
+*  <b>`shared_name`</b>: (Optional) If set, this queue will be shared under the given
+    name across multiple sessions.
 *  <b>`name`</b>: (Optional) A name for the operations.
 
 ##### Returns:
@@ -2023,7 +2147,7 @@ these conditions holds.
 
 - - -
 
-### `tf.train.shuffle_batch(tensor_list, batch_size, capacity, min_after_dequeue, num_threads=1, seed=None, enqueue_many=False, shapes=None, name=None)` {#shuffle_batch}
+### `tf.train.shuffle_batch(tensor_list, batch_size, capacity, min_after_dequeue, num_threads=1, seed=None, enqueue_many=False, shapes=None, shared_name=None, name=None)` {#shuffle_batch}
 
 Creates batches by randomly shuffling tensors.
 
@@ -2083,6 +2207,8 @@ these conditions holds.
 *  <b>`enqueue_many`</b>: Whether each tensor in `tensor_list` is a single example.
 *  <b>`shapes`</b>: (Optional) The shapes for each example.  Defaults to the
     inferred shapes for `tensor_list`.
+*  <b>`shared_name`</b>: (Optional) If set, this queue will be shared under the given
+    name across multiple sessions.
 *  <b>`name`</b>: (Optional) A name for the operations.
 
 ##### Returns:
@@ -2098,7 +2224,7 @@ these conditions holds.
 
 - - -
 
-### `tf.train.shuffle_batch_join(tensor_list_list, batch_size, capacity, min_after_dequeue, seed=None, enqueue_many=False, shapes=None, name=None)` {#shuffle_batch_join}
+### `tf.train.shuffle_batch_join(tensor_list_list, batch_size, capacity, min_after_dequeue, seed=None, enqueue_many=False, shapes=None, shared_name=None, name=None)` {#shuffle_batch_join}
 
 Create batches by randomly shuffling tensors.
 
@@ -2147,6 +2273,8 @@ you are responsible for catching this yourself.
     example.
 *  <b>`shapes`</b>: (Optional) The shapes for each example.  Defaults to the
     inferred shapes for `tensor_list_list[i]`.
+*  <b>`shared_name`</b>: (optional). If set, this queue will be shared under the given
+    name across multiple sessions.
 *  <b>`name`</b>: (Optional) A name for the operations.
 
 ##### Returns:

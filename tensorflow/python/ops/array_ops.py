@@ -54,12 +54,16 @@ or join multiple tensors together.
 @@reverse_sequence
 @@reverse
 @@transpose
+@@space_to_batch
+@@batch_to_space
 @@space_to_depth
 @@depth_to_space
 @@gather
+@@gather_nd
 @@dynamic_partition
 @@dynamic_stitch
 @@boolean_mask
+@@one_hot
 
 """
 from __future__ import absolute_import
@@ -79,6 +83,7 @@ from tensorflow.python.ops import gen_math_ops
 from tensorflow.python.ops import logging_ops
 # 'Constant' gets imported in the module 'array_ops'.
 from tensorflow.python.ops.constant_op import constant
+# go/tf-wildcard-import
 # pylint: disable=wildcard-import
 from tensorflow.python.ops.gen_array_ops import *
 # pylint: enable=wildcard-import
@@ -91,6 +96,13 @@ _baseslice = slice
 
 # Aliases for some automatically-generated names.
 listdiff = gen_array_ops.list_diff
+
+
+# DEPRECATED use init_ops.zeros_initializer
+# TODO(irving) Move it to init_ops.py
+def zeros_initializer(shape, dtype=dtypes.float32):
+  """An adaptor for zeros() to match the Initializer spec."""
+  return zeros(shape, dtype)
 
 
 # pylint: disable=undefined-variable,protected-access
@@ -120,13 +132,7 @@ def _SliceHelper(tensor, slice_spec):
   sizes = []
   squeeze_dims = []
   for dim, s in enumerate(slice_spec):
-    if isinstance(s, int):
-      if s < 0:
-        raise NotImplementedError("Negative indices are currently unsupported")
-      indices.append(s)
-      sizes.append(1)
-      squeeze_dims.append(dim)
-    elif isinstance(s, _baseslice):
+    if isinstance(s, _baseslice):
       if s.step not in (None, 1):
         raise NotImplementedError(
             "Steps other than 1 are not currently supported")
@@ -151,7 +157,15 @@ def _SliceHelper(tensor, slice_spec):
     elif s is Ellipsis:
       raise NotImplementedError("Ellipsis is not currently supported")
     else:
-      raise TypeError("Bad slice index %s of type %s" % (s, type(s)))
+      try:
+        s = int(s)
+      except TypeError:
+        raise TypeError("Bad slice index %s of type %s" % (s, type(s)))
+      if s < 0:
+        raise NotImplementedError("Negative indices are currently unsupported")
+      indices.append(s)
+      sizes.append(1)
+      squeeze_dims.append(dim)
   sliced = slice(tensor, indices, sizes)
   if squeeze_dims:
     return squeeze(sliced, squeeze_dims=squeeze_dims)
@@ -309,7 +323,16 @@ def concat(concat_dim, values, name="concat"):
     values = [values]
   # TODO(mrry): Change to return values?
   if len(values) == 1:  # Degenerate case of one tensor.
-    return identity(values[0], name=name)
+    # Make a throwaway call to convert_to_tensor to make sure
+    # that concat_dim is of the correct type, and make sure that
+    # the returned tensor is a scalar.
+    # TODO(keveman): Implement a standalone type and shape checker.
+    with ops.name_scope(name) as scope:
+      ops.convert_to_tensor(concat_dim,
+                            name="concat_dim",
+                            dtype=dtypes.int32).get_shape(
+                            ).assert_is_compatible_with(tensor_shape.scalar())
+      return identity(values[0], name=scope)
   return gen_array_ops._concat(concat_dim=concat_dim,
                                values=values,
                                name=name)
@@ -397,9 +420,10 @@ def boolean_mask(tensor, mask, name="boolean_mask"):
     ValueError:  If shapes do not conform.
 
   Examples:
+
   ```python
   # 2-D example
-  a = [[1, 2], [3, 4], [5, 6]]
+  tensor = [[1, 2], [3, 4], [5, 6]]
   mask = [True, False, True]
   boolean_mask(tensor, mask) ==> [[1, 2], [5, 6]]
   ```
@@ -541,7 +565,7 @@ def transpose(a, perm=None, name="transpose"):
   #           [[7  8  9]
   #            [10 11 12]]]
   # Take the transpose of the matrices in dimension-0
-  tf.transpose(b, perm=[0, 2, 1]) ==> [[[1  4]
+  tf.transpose(x, perm=[0, 2, 1]) ==> [[[1  4]
                                         [2  5]
                                         [3  6]]
 
@@ -594,10 +618,10 @@ def zeros(shape, dtype=dtypes.float32, name=None):
     A `Tensor` with all elements set to zero.
   """
   with ops.op_scope([shape], name, "zeros") as name:
-    if isinstance(shape, list):
+    if isinstance(shape, (list, tuple)):
       output = constant(0, shape=shape, dtype=dtype, name=name)
     else:
-      shape = ops.convert_to_tensor(shape, name="shape")
+      shape = ops.convert_to_tensor(shape, dtype=dtypes.int32, name="shape")
       output = fill(shape, constant(0, dtype=dtype), name=name)
   assert output.dtype.base_dtype == dtypes.as_dtype(dtype).base_dtype
   return output
@@ -628,10 +652,12 @@ def zeros_like(tensor, dtype=None, name=None):
   """
   with ops.op_scope([tensor], name, "zeros_like") as name:
     tensor = ops.convert_to_tensor(tensor, name="tensor")
-    ret = gen_array_ops._zeros_like(tensor)
-    if (dtype is not None) and (tensor.dtype != dtype):
-      ret = gen_math_ops.cast(ret, dtype)
-    return ret
+    if dtype is not None and tensor.dtype != dtype:
+      ret = zeros(shape(tensor), dtype, name=name)
+      ret.set_shape(tensor.get_shape())
+      return ret
+    else:
+      return gen_array_ops._zeros_like(tensor, name=name)
 
 
 def ones_like(tensor, dtype=None, name=None):
@@ -667,11 +693,6 @@ def ones_like(tensor, dtype=None, name=None):
     return ret
 
 
-def zeros_initializer(shape, dtype=dtypes.float32):
-  """An adaptor for zeros() to match the Initializer spec."""
-  return zeros(shape, dtype)
-
-
 def ones(shape, dtype=dtypes.float32, name=None):
   """Creates a tensor with all elements set to 1.
 
@@ -693,10 +714,10 @@ def ones(shape, dtype=dtypes.float32, name=None):
     A `Tensor` with all elements set to 1.
   """
   with ops.op_scope([shape], name, "ones") as name:
-    if isinstance(shape, list):
+    if isinstance(shape, (list, tuple)):
       output = constant(1, shape=shape, dtype=dtype, name=name)
     else:
-      shape = ops.convert_to_tensor(shape, name="shape")
+      shape = ops.convert_to_tensor(shape, dtype=dtypes.int32, name="shape")
       output = fill(shape, constant(1, dtype=dtype), name=name)
   assert output.dtype.base_dtype == dtypes.as_dtype(dtype).base_dtype
   return output
@@ -745,6 +766,73 @@ def placeholder(dtype, shape=None, name=None):
   return ret
 
 
+def pad(tensor, paddings, mode="CONSTANT", name=None):  # pylint: disable=invalid-name
+  """Pads a tensor.
+
+  This operation pads a `tensor` according to the `paddings` you specify.
+  `paddings` is an integer tensor with shape `[n, 2]`, where n is the rank of
+  `tensor`. For each dimension D of `input`, `paddings[D, 0]` indicates how
+  many values to add before the contents of `tensor` in that dimension, and
+  `paddings[D, 1]` indicates how many values to add after the contents of
+  `tensor` in that dimension. If `mode` is "REFLECT" then both `paddings[D, 0]`
+  and `paddings[D, 1]` must be no greater than `tensor.dim_size(D) - 1`. If
+  `mode` is "SYMMETRIC" then both `paddings[D, 0]` and `paddings[D, 1]` must be
+  no greater than `tensor.dim_size(D)`.
+
+  The padded size of each dimension D of the output is:
+
+  `paddings[D, 0] + tensor.dim_size(D) + paddings[D, 1]`
+
+  For example:
+
+  ```python
+  # 't' is [[1, 2, 3], [4, 5, 6]].
+  # 'paddings' is [[1, 1,], [2, 2]].
+  # rank of 't' is 2.
+  pad(t, paddings, "CONSTANT") ==> [[0, 0, 0, 0, 0, 0, 0],
+                                    [0, 0, 1, 2, 3, 0, 0],
+                                    [0, 0, 4, 5, 6, 0, 0],
+                                    [0, 0, 0, 0, 0, 0, 0]]
+
+  pad(t, paddings, "REFLECT") ==> [[6, 5, 4, 5, 6, 5, 4],
+                                   [3, 2, 1, 2, 3, 2, 1],
+                                   [6, 5, 4, 5, 6, 5, 4],
+                                   [3, 2, 1, 2, 3, 2, 1]]
+
+  pad(t, paddings, "SYMMETRIC") ==> [[2, 1, 1, 2, 3, 3, 2],
+                                     [2, 1, 1, 2, 3, 3, 2],
+                                     [5, 4, 4, 5, 6, 6, 5],
+                                     [5, 4, 4, 5, 6, 6, 5]]
+  ```
+
+  Args:
+    tensor: A `Tensor`.
+    paddings: A `Tensor` of type `int32`.
+    mode: One of "CONSTANT", "REFLECT", or "SYMMETRIC".
+    name: A name for the operation (optional).
+
+  Returns:
+    A `Tensor`. Has the same type as `tensor`.
+
+  Raises:
+    ValueError: When mode is not one of "CONSTANT", "REFLECT", or "SYMMETRIC".
+  """
+
+  if mode == "CONSTANT":
+    return gen_array_ops._pad(tensor, paddings, name=name)
+  if mode == "REFLECT":
+    return gen_array_ops._mirror_pad(tensor,
+                                     paddings,
+                                     mode="REFLECT",
+                                     name=name)
+  if mode == "SYMMETRIC":
+    return gen_array_ops._mirror_pad(tensor,
+                                     paddings,
+                                     mode="SYMMETRIC",
+                                     name=name)
+  raise ValueError("Unknown padding mode: %s" % mode)
+
+
 @ops.RegisterShape("Placeholder")
 def _PlaceholderShape(op):
   given_shape = tensor_util.TensorShapeProtoToList(op.get_attr("shape"))
@@ -758,6 +846,7 @@ def _PlaceholderShape(op):
 @ops.RegisterShape("Identity")
 @ops.RegisterShape("RefIdentity")
 @ops.RegisterShape("StopGradient")
+@ops.RegisterShape("BatchMatrixBandPart")
 def _UnchangedShape(op):
   return [op.inputs[0].get_shape()]
 
@@ -806,6 +895,16 @@ def _GatherShape(op):
   return [indices_shape.concatenate(params_shape[1:])]
 
 
+@ops.RegisterShape("GatherNd")
+def _GatherNdShape(op):
+  """Shape function for array_ops.gather_nd."""
+  params_shape = op.inputs[0].get_shape()
+  indices_shape = op.inputs[1].get_shape().with_rank_at_least(2)
+  if indices_shape.ndims is not None:
+    indices_shape[-1].merge_with(params_shape.ndims)
+  return [indices_shape[:-1]]
+
+
 @ops.RegisterShape("Unique")
 def _UniqueShape(op):
   """Shape function for array_ops.Unique."""
@@ -822,6 +921,22 @@ def _UniqueWithCountsShape(op):
   input_shape = op.inputs[0].get_shape()
   input_shape.assert_has_rank(1)
   return [tensor_shape.vector(None), input_shape, tensor_shape.vector(None)]
+
+
+@ops.RegisterShape("BatchMatrixDiag")
+def _BatchMatrixDiagShape(op):
+  """Shape function for array_ops.batch_matrix_diag."""
+  diag_shape = op.inputs[0].get_shape().with_rank_at_least(1)
+  return [diag_shape.concatenate(diag_shape[-1])]
+
+
+@ops.RegisterShape("BatchMatrixDiagPart")
+def _BatchMatrixDiagPartShape(op):
+  """Shape function for array_ops.batch_matrix_diag_part."""
+  input_shape = op.inputs[0].get_shape().with_rank_at_least(2)
+  # Last two dims must match
+  input_shape[-1].assert_is_compatible_with(input_shape[-2])
+  return [input_shape[:-1]]
 
 
 @ops.RegisterShape("Diag")
@@ -841,6 +956,32 @@ def _DiagShape(op):
   input_shape = op.inputs[0].get_shape().with_rank_at_most(3)
   return [input_shape.concatenate(input_shape)]
 
+@ops.RegisterShape("DiagPart")
+def _DiagPartShape(op):
+  """Shape function for array_ops.diag_part.
+
+  This op has one input (of rank k = 2, 4, or 6), and one output (of rank k/2),
+  where the shape of the output is the diagonal of the input shape.
+
+  Args:
+    op: A DiagPart Operation.
+
+  Returns:
+    A single-element list containing the shape of the output.
+
+  Raises:
+    ValueError: If input has odd rank or greater than 6, or the first and
+    second halves of the shape are incompatible.
+
+  """
+  input_shape = op.inputs[0].get_shape().with_rank_at_most(6)
+  rank = input_shape.ndims
+  if rank is None:
+    return [tensor_shape.unknown_shape()]
+  if rank % 2:
+    raise ValueError("Input must be even rank, got rank = " + str(rank) + ".")
+  mid = rank // 2
+  return [input_shape[:mid].merge_with(input_shape[mid:])]
 
 @ops.RegisterShape("ExpandDims")
 def _ExpandDimsShape(op):
@@ -1048,6 +1189,7 @@ def _ListDiffShape(op):
 
 
 @ops.RegisterShape("Pad")
+@ops.RegisterShape("MirrorPad")
 def _PadShape(op):
   """Shape function for the Pad op.
 
@@ -1087,6 +1229,27 @@ def _PadShape(op):
     return [tensor_shape.TensorShape(output_dims)]
 
 
+@ops.RegisterShape("MirrorPadGrad")
+def _MirrorPadGradShape(op):
+  """Shape function for the MirrorPadGrad op."""
+  paddings_shape = op.inputs[1].get_shape().with_rank(2)
+  input_shape = op.inputs[0].get_shape().with_rank(paddings_shape[0].value)
+  paddings_shape = paddings_shape.merge_with(tensor_shape.matrix(
+      input_shape.ndims, 2))
+  paddings = tensor_util.constant_value(op.inputs[1])
+  if paddings is None:
+    return [tensor_shape.unknown_shape(ndims=input_shape.ndims)]
+
+  output_dims = []
+  for i, dim in enumerate(input_shape.dims):
+    if paddings[i, 0] < 0 or paddings[i, 1] < 0:
+      raise ValueError("Paddings must be non-negative.")
+    if dim <= paddings[i, 0] + paddings[i, 1]:
+      raise ValueError("Output dimension is not positive.")
+    output_dims.append(dim - paddings[i, 0] - paddings[i, 1])
+  return [tensor_shape.TensorShape(output_dims)]
+
+
 @ops.RegisterShape("ReverseSequence")
 def _ReverseSequenceShape(op):
   """Shape function for the ReverseSequence op.
@@ -1109,14 +1272,17 @@ def _ReverseSequenceShape(op):
   """
   input_shape = op.inputs[0].get_shape()
   seq_lens_shape = op.inputs[1].get_shape().with_rank(1)
+  if input_shape.ndims is None:
+    return [None]
   seq_dim = op.get_attr("seq_dim")
   batch_dim = op.get_attr("batch_dim")
-  if batch_dim >= input_shape.ndims:
-    raise ValueError("batch_dim must be < input.dims() (%d vs %d)" %
-                     (batch_dim, input_shape.ndims))
-  if seq_dim >= input_shape.ndims:
-    raise ValueError("seq_dim must be < input.dims() (%d vs %d)" %
-                     (seq_dim, input_shape.ndims))
+  if input_shape.ndims is not None:
+    if batch_dim >= input_shape.ndims:
+      raise ValueError("batch_dim must be < input.dims() (%d vs %d)" %
+                       (batch_dim, input_shape.ndims))
+    if seq_dim >= input_shape.ndims:
+      raise ValueError("seq_dim must be < input.dims() (%d vs %d)" %
+                       (seq_dim, input_shape.ndims))
   batch_size = input_shape[batch_dim].merge_with(seq_lens_shape[0])
   input_shape = tensor_shape.TensorShape([
       value if ix != batch_dim else batch_size
@@ -1346,6 +1512,153 @@ def _QuantizeDequantizeShape(op):
   return common_shapes.unchanged_shape(op)
 
 
+@ops.RegisterShape("SpaceToBatch")
+def _SpaceToBatchShape(op):
+  """Shape function for the SpaceToBatch op.
+
+  The output shape is determined by the following inputs/ attributes:
+
+  * input: A rank-4 tensor with shape [B, H, W, D]
+  * paddings: A 2-by-2 matrix, specified as follows:
+
+        paddings = [[pad_top, pad_bottom], [pad_left, pad_right]],
+
+    implying effective padded spatial dimensions:
+
+        Hp = pad_top + H + pad_bottom
+        Wp = pad_left + W + pad_right
+
+    Both Hp and Wp must be multiples of block_size.
+  * block_size: an int.
+
+  Its output is also a rank-4 tensor with shape:
+
+      [B*block_size*block_size, Hp/block_size, Wp/block_size, D]
+
+  Args:
+    op: A SpaceToBatch op.
+
+  Returns:
+    A single-element list containing the shape of the output.
+
+  Raises:
+    ValueError: If the shapes of inputs are not as expected.
+    IndexError: If block_size does not divide Wp or Hp.
+  """
+  # Check that the input tensor is 4-D.
+  try:
+    input_shape = op.inputs[0].get_shape().with_rank(4)
+  except ValueError:
+    raise ValueError(
+        "tf.space_to_batch() requires 4-D input tensor.")
+
+  # Check that the paddings tensor is a matrix with shape [2, 2].
+  try:
+    paddings_shape = op.inputs[1].get_shape().with_rank(2)
+  except ValueError:
+    raise ValueError(
+        "tf.space_to_batch() requires 2-D paddings tensor.")
+
+  if paddings_shape[0] != 2 or paddings_shape[1] != 2:
+    raise ValueError(
+        "tf.space_to_batch() requires input paddings with shape [2, 2].")
+
+  block_size = op.get_attr("block_size")
+  if block_size <= 1:
+    raise ValueError("Attribute block_size has to be > 1.")
+
+  paddings = tensor_util.constant_value(op.inputs[1])
+  if (paddings[0, 0] < 0 or paddings[0, 1] < 0 or
+      paddings[1, 0] < 0 or paddings[1, 1] < 0):
+    raise ValueError("paddings cannot be negative.")
+
+  input_height = input_shape[1] + paddings[0, 0] + paddings[0, 1]
+  input_width = input_shape[2] + paddings[1, 0] + paddings[1, 1]
+
+  if input_height % block_size > 0 or input_width % block_size > 0:
+    raise IndexError("block_size needs to divide both width and height.")
+
+  batch = input_shape[0] * block_size * block_size
+  height = input_height // block_size
+  width = input_width // block_size
+  depth = input_shape[3]
+
+  return [tensor_shape.TensorShape([batch, height, width, depth])]
+
+
+@ops.RegisterShape("BatchToSpace")
+def _BatchToSpaceShape(op):
+  """Shape function for the BatchToSpace op.
+
+  The output shape is determined by the following inputs/ attributes:
+
+  * input: A rank-4 tensor with shape
+
+        [B*block_size*block_size, Hp/block_size, Wp/block_size, D]
+
+    Note that the batch size of the input tensor must be divisible by
+    `block_size * block_size`.
+  * crops: A 2-by-2 matrix, specified as follows:
+
+        crops = [[crop_top, crop_bottom], [crop_left, crop_right]].
+
+  * block_size: an int.
+
+  Its output is also a rank-4 tensor with shape [B, H, W, D], where:
+
+      H = Hp - crop_top - crop_bottom
+      W = Wp - crop_left - crop_right
+
+  Args:
+    op: A BatchToSpace op.
+
+  Returns:
+    A single-element list containing the shape of the output.
+
+  Raises:
+    ValueError: If the shapes of the inputs are not as expected.
+    IndexError: If block_size*block_size does not divide the input batch size.
+  """
+  # Check that the input tensor is 4-D.
+  try:
+    input_shape = op.inputs[0].get_shape().with_rank(4)
+  except ValueError:
+    raise ValueError("tf.batch_to_space() requires 4-D input tensor.")
+
+  # Check that the crops tensor is a matrix with shape [2, 2].
+  try:
+    crops_shape = op.inputs[1].get_shape().with_rank(2)
+  except ValueError:
+    raise ValueError(
+        "tf.space_to_batch() requires 2-D crops tensor.")
+
+  if crops_shape[0] != 2 or crops_shape[1] != 2:
+    raise ValueError(
+        "tf.space_to_batch() requires input crops with shape [2, 2].")
+
+  crops = tensor_util.constant_value(op.inputs[1])
+  if (crops[0, 0] < 0 or crops[0, 1] < 0 or
+      crops[1, 0] < 0 or crops[1, 1] < 0):
+    raise ValueError("crops cannot be negative.")
+
+  block_size = op.get_attr("block_size")
+  if block_size <= 1:
+    raise ValueError("Attribute block_size has to be > 1.")
+
+  input_batch = input_shape[0]
+  if input_batch % (block_size * block_size) > 0:
+    raise IndexError("input batch must be divisible by block_size*block_size.")
+  batch = input_batch // (block_size * block_size)
+
+  height = input_shape[1] * block_size - crops[0, 0] - crops[0, 1]
+  width = input_shape[2] * block_size - crops[1, 0] - crops[1, 1]
+  if height <= 0 or width <= 0:
+    raise ValueError("Output height or width is not positive.")
+  depth = input_shape[3]
+
+  return [tensor_shape.TensorShape([batch, height, width, depth])]
+
+
 @ops.RegisterShape("SpaceToDepth")
 def _SpaceToDepthShape(op):
   """Shape function for the SpaceToDepth op.
@@ -1442,3 +1755,162 @@ def _DepthToSpaceShape(op):
   new_depth = input_depth // (block_size * block_size)
   return [tensor_shape.TensorShape(
       [input_shape[0], height, width, new_depth])]
+
+
+def one_hot(indices, depth, on_value=1, off_value=0,
+            axis=None, dtype=dtypes.float32, name=None):
+  """Returns a one-hot tensor.
+
+  The locations represented by indices in `indices` take value `on_value`,
+  while all other locations take value `off_value`. By default, `on_value` is 1,
+  and `off_value` is 0. The type of the output tensor is specified by `dtype`, 
+  which defaults to `tf.float32`.
+
+  If the input `indices` is rank `N`, the output will have rank `N+1`. The
+  new axis is created at dimension `axis` (default: the new axis is appended
+  at the end).
+
+  If `indices` is a scalar the output shape will be a vector of length `depth`
+
+  If `indices` is a vector of length `features`, the output shape will be:
+  ```
+    features x depth if axis == -1
+    depth x features if axis == 0
+  ```
+
+  If `indices` is a matrix (batch) with shape `[batch, features]`, the output
+  shape will be:
+  ```
+    batch x features x depth if axis == -1
+    batch x depth x features if axis == 1
+    depth x batch x features if axis == 0
+  ```
+
+
+  Examples
+  =========
+
+  Suppose that
+
+  ```
+    indices = [0, 2, -1, 1]
+    depth = 3
+    on_value = 5.0
+    off_value = 0.0
+    axis = -1
+  ```
+
+  Then output is `[4 x 3]`:
+
+  ```
+    output =
+    [5.0 0.0 0.0]  // one_hot(0)
+    [0.0 0.0 5.0]  // one_hot(2)
+    [0.0 0.0 0.0]  // one_hot(-1)
+    [0.0 5.0 0.0]  // one_hot(1)
+  ```
+
+  Suppose that
+
+  ```
+    indices = [[0, 2], [1, -1]]
+    depth = 3
+    on_value = 1.0
+    off_value = 0.0
+    axis = -1
+  ```
+
+  Then output is `[2 x 2 x 3]`:
+
+  ```
+    output =
+    [
+      [1.0, 0.0, 0.0]  // one_hot(0)
+      [0.0, 0.0, 1.0]  // one_hot(2)
+    ][
+      [0.0, 1.0, 0.0]  // one_hot(1)
+      [0.0, 0.0, 0.0]  // one_hot(-1)
+    ]
+  ```
+
+  Args:
+    indices: A `Tensor` of indices.
+    depth: A scalar defining the depth of the one hot dimension.
+    on_value: A scalar defining the value to fill in output when `indices[j]
+      = i`. (default: 1)
+    off_value: A scalar defining the value to fill in output when `indices[j]
+      != i`. (default: 0)
+    axis: The axis to fill (default: -1, a new inner-most axis).
+    dtype: The data type of the output tensor.
+
+  Returns:
+    output: The one-hot tensor.
+
+  Raises:
+    TypeError: If dtype is `tf.string`
+  """
+  # Check for bad dtype specification
+  if dtype == dtypes.string:
+    raise TypeError("dtype must be a numeric type")
+
+  with ops.op_scope([indices, depth, on_value, off_value,
+            axis, dtype], name, "one_hot") as name:
+    on_value = ops.convert_to_tensor(on_value, dtype=dtype, name="on_value")
+    off_value = ops.convert_to_tensor(off_value, dtype=dtype, name="off_value")
+    indices = ops.convert_to_tensor(indices, dtype=dtypes.int64, name="indices")
+    depth = ops.convert_to_tensor(depth, dtype=dtypes.int32, name="depth")
+    return gen_array_ops._one_hot(indices, depth, on_value, 
+                                  off_value, axis, name)
+
+
+@ops.RegisterShape("OneHot")
+def _OneHotShape(op):
+  """Shape function for the OneHot op.
+
+  It closely follows the code in the .cc implementation.
+
+  Args:
+    op: A OneHot Operation.
+
+  Returns:
+    A single-element list containing the shape of the output.
+
+  Raises:
+    ValueError: if axis < -1.
+  """
+  indices_shape = op.inputs[0].get_shape()
+  indices_dims = indices_shape.ndims
+  depth = tensor_util.constant_value(op.inputs[1])
+  axis = op.get_attr("axis")
+
+  if axis < -1:
+    raise ValueError("axis must be >= -1")
+
+  new_shape = None
+  if indices_dims is not None:
+    new_shape = indices_shape.as_list()
+    new_shape.insert(axis % (indices_dims + 1), depth)
+
+  return [tensor_shape.TensorShape(new_shape)]
+
+
+@ops.RegisterShape("PlaceholderWithDefault")
+def _PlaceholderWithDefaultShape(op):
+  """Shape function for the PlaceholderWithDefault op.
+
+  This op acts as an identity when it is not fed (passing through a
+  default value), but allows the user to feed it with tensors of a
+  possibly less precise shape than its default value.
+
+  Args:
+    op: A PlaceholderWithDefault `Operation`.
+
+  Returns:
+    A single-element list containing the shape of the output.
+  """
+  input_shape = op.inputs[0].get_shape()
+  output_shape = tensor_shape.TensorShape(op.get_attr("shape"))
+  # NOTE(mrry): We don't merge these shapes, because `output_shape`
+  # may be *less* precise than `input_shape`.
+  input_shape.assert_is_compatible_with(output_shape)
+  return [output_shape]

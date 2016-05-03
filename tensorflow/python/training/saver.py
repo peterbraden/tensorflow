@@ -48,24 +48,67 @@ from tensorflow.python.ops import io_ops
 from tensorflow.python.ops import state_ops
 from tensorflow.python.ops import variables
 from tensorflow.python.platform import gfile
-from tensorflow.python.platform import logging
+from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.training import training_util
 from tensorflow.python.training.checkpoint_state_pb2 import CheckpointState
 from tensorflow.python.util import compat
 
 
-def _stripped_op_list_for_graph(graph_def):
-  """Returns OpDefs of ops used in graph_def."""
-  op_set = set()
+def stripped_op_list_for_graph(graph_def):
+  """Collect the ops used by a graph.
+
+  This function computes the `stripped_op_list` field of `MetaGraphDef` and
+  similar protos.  The result can be communicated from the producer to the
+  consumer, which can then use the C++ function
+  `RemoveNewDefaultAttrsFromGraphDef` to improve forwards compatibility.
+
+  Args:
+    graph_def: A `GraphDef` proto, as from `graph.as_graph_def()`.
+
+  Returns:
+    An `OpList` of ops used by the graph.
+
+  Raises:
+    ValueError: If an unregistered op is used.
+  """
+  # This is the Python equivalent of StrippedOpListForGraph in C++.
+  # Unfortunately, since the Python op registry can differ from that in C++, we
+  # can't remove the duplication using swig (at least naively).
+  # TODO(irving): Support taking graphs directly.
+
+  # Map function names to definitions
+  name_to_function = {}
+  for fun in graph_def.library.function:
+    name_to_function[fun.signature.name] = fun
+
+  # Collect the list of op names.  Since functions can reference functions, we
+  # need a recursive traversal.
+  used_ops = set()  # Includes both primitive ops and functions
+  functions_to_process = []  # A subset of used_ops
+  def mark_op_as_used(op):
+    if op not in used_ops and op in name_to_function:
+      functions_to_process.append(name_to_function[op])
+    used_ops.add(op)
+  for node in graph_def.node:
+    mark_op_as_used(node.op)
+  while functions_to_process:
+    fun = functions_to_process.pop()
+    for node in fun.node:
+      mark_op_as_used(node.op)
+
+  # Verify that all used ops are registered.
   registered_ops = op_def_registry.get_registered_ops()
-  for n in graph_def.node:
-    if n.op in registered_ops:
-      op_set.add(n.op)
-  for func in graph_def.library.function:
-    for n in func.node:
-      if n.op in registered_ops:
-        op_set.add(n.op)
-  return op_def_pb2.OpList(op=[registered_ops[x] for x in sorted(op_set)])
+  # These internal ops used by functions are not registered, so we need to
+  # whitelist them.  # TODO(irving): Do something better here.
+  op_whitelist = ("_Arg", "_Retval", "_ListToArray", "_ArrayToList")
+  for op in used_ops:
+    if (op not in name_to_function and op not in registered_ops and
+        op not in op_whitelist):
+      raise ValueError("Op %s is used by the graph, but is not registered" % op)
+
+  # Build the stripped op list in sorted order
+  return op_def_pb2.OpList(op=[registered_ops[op] for op in sorted(used_ops)
+                               if op in registered_ops])
 
 
 class BaseSaverBuilder(object):
@@ -217,11 +260,10 @@ class BaseSaverBuilder(object):
             shape = array_ops.shape(v)
           values = array_ops.reshape(values, shape)
 
-      # Assign on the same device as the variable.
-      with ops.device(v.device):
-        assign_ops.append(state_ops.assign(v,
-                                           values,
-                                           validate_shape=not reshape))
+      validate_shape = not reshape and v.get_shape().is_fully_defined()
+      assign_ops.append(state_ops.assign(v,
+                                         values,
+                                         validate_shape=validate_shape))
 
     # Create a Noop that has control dependencies from all the updates.
     return control_flow_ops.group(*assign_ops, name=name)
@@ -360,8 +402,9 @@ class BaseSaverBuilder(object):
           if slice_name is None:
             slice_name = variable._save_slice_info.full_name
           elif slice_name != variable._save_slice_info.full_name:
-            raise variable("Slices must all be from the same tensor: %s != %s"
-                           % (slice_name, variable._save_slice_info.full_name))
+            raise ValueError(
+                "Slices must all be from the same tensor: %s != %s"
+                % (slice_name, variable._save_slice_info.full_name))
           self._AddVarToSave(vars_to_save, seen_variables,
                              variable, variable._save_slice_info.spec, name)
         # pylint: enable=protected-access
@@ -418,8 +461,10 @@ class BaseSaverBuilder(object):
         Variable nodes.
       max_to_keep: Maximum number of checkpoints to keep.  As new checkpoints
         are created, old ones are deleted.  If None or 0, no checkpoints are
-        deleted.  Presently the number is only roughly enforced.  For example
-        in case of restarts more than max_to_keep checkpoints may be kept.
+        deleted from the filesystem but only the last one is kept in the
+        `checkpoint` file.  Presently the number is only roughly enforced.  For
+        example in case of restarts more than max_to_keep checkpoints may be
+        kept.
       keep_checkpoint_every_n_hours: How often checkpoints should be kept.
         Defaults to 10,000 hours.
       name: String.  Optional name to use as a prefix when adding operations.
@@ -934,7 +979,7 @@ class Saver(object):
     self._last_checkpoints = last_checkpoints_with_time
 
   def save(self, sess, save_path, global_step=None, latest_filename=None,
-           meta_graph_suffix="meta"):
+           meta_graph_suffix="meta", write_meta_graph=True):
     """Saves variables.
 
     This method runs the ops added by the constructor for saving variables.
@@ -957,6 +1002,8 @@ class Saver(object):
         managed by the saver to keep track of recent checkpoints.  Defaults to
         'checkpoint'.
       meta_graph_suffix: Suffix for `MetaGraphDef` file. Defaults to 'meta'.
+      write_meta_graph: `Boolean` indicating whether or not to write the meta
+        graph file.
 
     Returns:
       A string: path at which the variables were saved.  If the saver is
@@ -991,10 +1038,11 @@ class Saver(object):
                                     meta_graph_suffix=meta_graph_suffix)
     update_checkpoint_state(save_path, model_checkpoint_path,
                             self.last_checkpoints, latest_filename)
-    meta_graph_filename = self._MetaGraphFilename(
-        checkpoint_file, meta_graph_suffix=meta_graph_suffix)
-    with sess.graph.as_default():
-      self.export_meta_graph(meta_graph_filename)
+    if write_meta_graph:
+      meta_graph_filename = self._MetaGraphFilename(
+          checkpoint_file, meta_graph_suffix=meta_graph_suffix)
+      with sess.graph.as_default():
+        self.export_meta_graph(meta_graph_filename)
 
     return model_checkpoint_path
 
@@ -1030,7 +1078,12 @@ class Saver(object):
     Args:
       sess: A `Session` to use to restore the parameters.
       save_path: Path where parameters were previously saved.
+
+    Raises:
+      ValueError: If the given `save_path` does not point to a file.
     """
+    if not gfile.Glob(save_path):
+      raise ValueError("Restore called with invalid save path %s" % save_path)
     sess.run(self.saver_def.restore_op_name,
              {self.saver_def.filename_tensor_name: save_path})
 
@@ -1152,7 +1205,7 @@ def _as_meta_graph_def(meta_info_def=None, graph_def=None, saver_def=None,
   """
   # Type check.
   if meta_info_def and not isinstance(meta_info_def,
-                                      meta_graph_pb2.MetaInfoDef):
+                                      meta_graph_pb2.MetaGraphDef.MetaInfoDef):
     raise TypeError("meta_info_def must be of type MetaInfoDef, not %s",
                     type(meta_info_def))
   if graph_def and not isinstance(graph_def, graph_pb2.GraphDef):
@@ -1178,7 +1231,7 @@ def _as_meta_graph_def(meta_info_def=None, graph_def=None, saver_def=None,
   # pylint: disable=g-explicit-length-test
   if len(meta_graph_def.meta_info_def.stripped_op_list.op) == 0:
     meta_graph_def.meta_info_def.stripped_op_list.MergeFrom(
-        _stripped_op_list_for_graph(meta_graph_def.graph_def))
+        stripped_op_list_for_graph(meta_graph_def.graph_def))
   # pylint: enable=g-explicit-length-test
 
   # Adds saver_def.
@@ -1195,7 +1248,7 @@ def _as_meta_graph_def(meta_info_def=None, graph_def=None, saver_def=None,
   return meta_graph_def
 
 
-def _read_meta_graph_file(filename):
+def read_meta_graph_file(filename):
   """Reads a file containing `MetaGraphDef` and returns the protocol buffer.
 
   Args:
@@ -1232,7 +1285,7 @@ def _read_meta_graph_file(filename):
 
 
 def _import_meta_graph_def(meta_graph_def):
-  """Recreates a Graph saved in a a `MetaGraphDef` proto.
+  """Recreates a Graph saved in a `MetaGraphDef` proto.
 
   This function adds all the nodes from the meta graph def proto to the current
   graph, recreates all the collections, and returns a saver from saver_def.
@@ -1241,7 +1294,10 @@ def _import_meta_graph_def(meta_graph_def):
     meta_graph_def: `MetaGraphDef` protocol buffer.
 
   Returns:
-    A saver constructed rom `saver_def` in `meta_graph_def`.
+    A saver constructed from `saver_def` in `meta_graph_def` or None.
+
+    A None value is returned if no variables exist in the `meta_graph_def`
+    (i.e., no variables to restore).
   """
   # Gathers the list of nodes we are interested in.
   importer.import_graph_def(meta_graph_def.graph_def, name="")
@@ -1280,7 +1336,14 @@ def _import_meta_graph_def(meta_graph_def):
   if meta_graph_def.HasField("saver_def"):
     return Saver(saver_def=meta_graph_def.saver_def)
   else:
-    return Saver()
+    if variables.all_variables():
+      # Return the default saver instance for all graph variables.
+      return Saver()
+    else:
+      # If not graph variables exist, then a Saver cannot be constructed.
+      logging.info("Saver not created because there are no variables in the"
+                   " graph to restore")
+      return None
 
 
 def import_meta_graph(meta_graph_or_file):
@@ -1324,7 +1387,7 @@ def import_meta_graph(meta_graph_or_file):
   with tf.Session() as sess:
     new_saver = tf.train.import_meta_graph('my-save-dir/my-model-10000.meta')
     new_saver.restore(sess, 'my-save-dir/my-model-10000')
-    # tf.get_collection() retrurns a list. In this example we only want the
+    # tf.get_collection() returns a list. In this example we only want the
     # first one.
     train_op = tf.get_collection('train_op')[0]
     for step in xrange(1000000):
@@ -1339,12 +1402,15 @@ def import_meta_graph(meta_graph_or_file):
       the path) containing a `MetaGraphDef`.
 
   Returns:
-    A saver constructed rom `saver_def` in `MetaGraphDef`.
+    A saver constructed from `saver_def` in `MetaGraphDef` or None.
+
+    A None value is returned if no variables exist in the `MetaGraphDef`
+    (i.e., there are no variables to restore).
   """
   if isinstance(meta_graph_or_file, meta_graph_pb2.MetaGraphDef):
     return _import_meta_graph_def(meta_graph_or_file)
   else:
-    return _import_meta_graph_def(_read_meta_graph_file(meta_graph_or_file))
+    return _import_meta_graph_def(read_meta_graph_file(meta_graph_or_file))
 
 
 def export_meta_graph(filename=None, meta_info_def=None, graph_def=None,

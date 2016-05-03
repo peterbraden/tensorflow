@@ -18,12 +18,13 @@ limitations under the License.
 #include <set>
 #include <unordered_map>
 #include "tensorflow/core/framework/attr_value_util.h"
+#include "tensorflow/core/framework/op_def.pb_text.h"
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/stringpiece.h"
 #include "tensorflow/core/lib/gtl/map_util.h"
+#include "tensorflow/core/lib/strings/scanner.h"
 #include "tensorflow/core/platform/protobuf.h"
-#include "tensorflow/core/platform/regexp.h"
 #include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
@@ -155,12 +156,12 @@ OpDef::AttrDef* FindAttrMutable(StringPiece name, OpDef* op_def) {
   return nullptr;
 }
 
-#define VALIDATE(EXPR, ...)                                       \
-  do {                                                            \
-    if (!(EXPR)) {                                                \
-      return errors::InvalidArgument(__VA_ARGS__, "; in OpDef: ", \
-                                     op_def.ShortDebugString());  \
-    }                                                             \
+#define VALIDATE(EXPR, ...)                                          \
+  do {                                                               \
+    if (!(EXPR)) {                                                   \
+      return errors::InvalidArgument(__VA_ARGS__, "; in OpDef: ",    \
+                                     ProtoShortDebugString(op_def)); \
+    }                                                                \
   } while (false)
 
 static Status ValidateArg(const OpDef::ArgDef& arg, const OpDef& op_def,
@@ -221,8 +222,16 @@ static Status ValidateArg(const OpDef::ArgDef& arg, const OpDef& op_def,
 }
 
 Status ValidateOpDef(const OpDef& op_def) {
-  VALIDATE(RE2::FullMatch(op_def.name(), "(?:_.*|[A-Z][a-zA-Z0-9]*)"),
-           "Invalid name: ", op_def.name(), " (Did you use CamelCase?)");
+  using ::tensorflow::strings::Scanner;
+
+  if (!StringPiece(op_def.name()).starts_with("_")) {
+    VALIDATE(Scanner(op_def.name())
+                 .One(Scanner::UPPERLETTER)
+                 .Any(Scanner::LETTER_DIGIT)
+                 .Eos()
+                 .GetResult(),
+             "Invalid name: ", op_def.name(), " (Did you use CamelCase?)");
+  }
 
   std::set<string> names;  // for detecting duplicate names
   for (const auto& attr : op_def.attr()) {
@@ -298,6 +307,23 @@ Status ValidateOpDef(const OpDef& op_def) {
 }
 
 #undef VALIDATE
+
+Status CheckOpDeprecation(const OpDef& op_def, int graph_def_version) {
+  if (op_def.has_deprecation()) {
+    const OpDeprecation& dep = op_def.deprecation();
+    if (graph_def_version >= dep.version()) {
+      return errors::Unimplemented(
+          "Op ", op_def.name(), " is not available in GraphDef version ",
+          graph_def_version, ". It has been removed in version ", dep.version(),
+          ". ", dep.explanation(), ".");
+    } else {
+      LOG(WARNING) << "Op is deprecated."
+                   << " It will cease to work in GraphDef version "
+                   << dep.version() << ". " << dep.explanation() << ".";
+    }
+  }
+  return Status::OK();
+}
 
 namespace {
 
@@ -553,7 +579,7 @@ Status OpDefAddedDefaultsUnchanged(const OpDef& old_op,
   return Status::OK();
 }
 
-void RemoveDescriptionsFromOpDef(OpDef* op_def) {
+void RemoveNonDeprecationDescriptionsFromOpDef(OpDef* op_def) {
   for (int i = 0; i < op_def->input_arg_size(); ++i) {
     op_def->mutable_input_arg(i)->clear_description();
   }
@@ -565,6 +591,13 @@ void RemoveDescriptionsFromOpDef(OpDef* op_def) {
   }
   op_def->clear_summary();
   op_def->clear_description();
+}
+
+void RemoveDescriptionsFromOpDef(OpDef* op_def) {
+  RemoveNonDeprecationDescriptionsFromOpDef(op_def);
+  if (op_def->has_deprecation()) {
+    op_def->mutable_deprecation()->clear_explanation();
+  }
 }
 
 void RemoveDescriptionsFromOpList(OpList* op_list) {

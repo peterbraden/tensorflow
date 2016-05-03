@@ -41,7 +41,6 @@ namespace {
 class SubgraphTest : public ::testing::Test {
  protected:
   SubgraphTest() : g_(new Graph(OpRegistry::Global())) {
-    RequireDefaultOps();
     device_info_.set_name("/job:a/replica:0/task:0/cpu:0");
     device_info_.set_device_type(DeviceType(DEVICE_CPU).type());
     device_info_.set_incarnation(0);
@@ -267,11 +266,13 @@ TEST_F(SubgraphTest, Errors) {
   EXPECT_TRUE(
       HasSubstr(Subgraph("c:0", "b:0,c:0", ""), "both fed and fetched"));
   // Feed not found.
-  EXPECT_TRUE(HasSubstr(Subgraph("foo:0", "", ""), "unable to find"));
+  EXPECT_TRUE(HasSubstr(Subgraph("foo:0", "c:0", ""), "unable to find"));
   // Fetch not found.
   EXPECT_TRUE(HasSubstr(Subgraph("", "foo:0", ""), "not found"));
   // Target not found.
   EXPECT_TRUE(HasSubstr(Subgraph("", "", "foo"), "not found"));
+  // No targets specified.
+  EXPECT_TRUE(HasSubstr(Subgraph("", "", ""), "at least one target"));
 }
 
 REGISTER_OP("In").Output("o: float");

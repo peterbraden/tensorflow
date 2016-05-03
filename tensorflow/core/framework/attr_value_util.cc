@@ -16,10 +16,12 @@ limitations under the License.
 #include "tensorflow/core/framework/attr_value_util.h"
 
 #include <vector>
+#include "tensorflow/core/framework/attr_value.pb_text.h"
+#include "tensorflow/core/framework/tensor.pb_text.h"
 #include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/framework/types.pb_text.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/stringpiece.h"
-#include "tensorflow/core/lib/strings/regexp.h"
 #include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/platform/protobuf.h"
 
@@ -35,7 +37,7 @@ string SummarizeTensor(const TensorProto& tensor_proto) {
   Tensor t;
   if (!t.FromProto(tensor_proto)) {
     return strings::StrCat("<Invalid TensorProto: ",
-                           tensor_proto.ShortDebugString(), ">");
+                           ProtoShortDebugString(tensor_proto), ">");
   }
   return t.DebugString();
 }
@@ -53,7 +55,7 @@ string SummarizeAttrValue(const AttrValue& attr_value) {
     case AttrValue::kB:
       return attr_value.b() ? "true" : "false";
     case AttrValue::kType:
-      return DataType_Name(attr_value.type());
+      return EnumName_DataType(attr_value.type());
     case AttrValue::kShape:
       return PartialTensorShape::DebugString(attr_value.shape());
     case AttrValue::kTensor:
@@ -83,7 +85,8 @@ string SummarizeAttrValue(const AttrValue& attr_value) {
       } else if (attr_value.list().type_size() > 0) {
         for (int i = 0; i < attr_value.list().type_size(); ++i) {
           if (i > 0) strings::StrAppend(&ret, ", ");
-          strings::StrAppend(&ret, DataType_Name(attr_value.list().type(i)));
+          strings::StrAppend(&ret,
+                             EnumName_DataType(attr_value.list().type(i)));
         }
       } else if (attr_value.list().shape_size() > 0) {
         for (int i = 0; i < attr_value.list().shape_size(); ++i) {
@@ -250,10 +253,16 @@ bool ParseAttrValue(StringPiece type, StringPiece text, AttrValue* out) {
   if (is_list) {
     // TextFormat parser considers "i: 7" to be the same as "i: [7]",
     // but we only want to allow list values with [].
-    if (!RE2::FullMatch(ToRegexpStringPiece(text), "\\s*\\[.*\\]\\s*")) {
+    StringPiece cleaned = text;
+    str_util::RemoveLeadingWhitespace(&cleaned);
+    str_util::RemoveTrailingWhitespace(&cleaned);
+    if (cleaned.size() < 2 || cleaned[0] != '[' ||
+        cleaned[cleaned.size() - 1] != ']') {
       return false;
     }
-    if (RE2::FullMatch(ToRegexpStringPiece(text), "\\s*\\[\\s*\\]\\s*")) {
+    cleaned.remove_prefix(1);
+    str_util::RemoveLeadingWhitespace(&cleaned);
+    if (cleaned.size() == 1) {
       // User wrote "[]", so return empty list without invoking the TextFormat
       // parse which returns an error for "i: []".
       out->Clear();
@@ -265,8 +274,7 @@ bool ParseAttrValue(StringPiece type, StringPiece text, AttrValue* out) {
     to_parse = strings::StrCat(field_name, ": ", text);
   }
 
-  // Parse if we can.
-  return protobuf::TextFormat::ParseFromString(to_parse, out);
+  return ProtoParseFromString(to_parse, out);
 }
 
 #define DEFINE_SET_ATTR_VALUE_ONE(ARG_TYPE, FIELD) \

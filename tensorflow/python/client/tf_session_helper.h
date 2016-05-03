@@ -16,22 +16,8 @@ limitations under the License.
 #ifndef TENSORFLOW_PYTHON_CLIENT_TF_SESSION_HELPER_H_
 #define TENSORFLOW_PYTHON_CLIENT_TF_SESSION_HELPER_H_
 
-#ifdef PyArray_Type
-#error "Numpy cannot be included before tf_session_helper.h."
-#endif
-
-// Disallow Numpy 1.7 deprecated symbols.
-#define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
-
-// We import_array in the tensorflow init function only.
-#define PY_ARRAY_UNIQUE_SYMBOL _tensorflow_numpy_api
-#ifndef TF_IMPORT_NUMPY
-#define NO_IMPORT_ARRAY
-#endif
-
-#include <Python.h>
-
-#include "numpy/arrayobject.h"
+// Must be included first
+#include "tensorflow/python/lib/core/numpy.h"
 
 #include "tensorflow/core/framework/graph.pb.h"
 #include "tensorflow/core/lib/core/errors.h"
@@ -47,7 +33,8 @@ namespace tensorflow {
 // A FeedVector is a vector of tensor name and numpy array pairs. The
 // name is a borrowed C string.
 typedef tensorflow::gtl::InlinedVector<std::pair<const char*, PyArrayObject*>,
-                                       8> FeedVector;
+                                       8>
+    FeedVector;
 
 // A NameVector is a vector of tensor or operation names, as borrowed
 // C strings.
@@ -75,10 +62,10 @@ Safe_PyObjectPtr make_safe(PyObject* o);
 //
 // On failure, out_status contains a tensorflow::Status with an error
 // message.
-void TF_Run_wrapper(TF_Session* session, const FeedVector& inputs,
-                    const NameVector& output_names,
+void TF_Run_wrapper(TF_Session* session, const TF_Buffer* run_options,
+                    const FeedVector& inputs, const NameVector& output_names,
                     const NameVector& target_nodes, Status* out_status,
-                    PyObjectVector* out_values);
+                    PyObjectVector* out_values, TF_Buffer* run_outputs);
 
 // Set up the graph with the intended feeds and fetches for partial run.
 // *out_handle is owned by the caller.
@@ -108,11 +95,6 @@ void TF_PRunSetup_wrapper(TF_Session* session, const NameVector& input_names,
 void TF_PRun_wrapper(TF_Session* session, const char* handle,
                      const FeedVector& inputs, const NameVector& output_names,
                      Status* out_status, PyObjectVector* out_values);
-
-// Import numpy.  This wrapper function exists so that the
-// PY_ARRAY_UNIQUE_SYMBOL can be safely defined in a .cc file to
-// avoid weird linking issues.
-void ImportNumpy();
 
 // Convenience wrapper around EqualGraphDef to make it easier to wrap.
 // Returns an explanation if a difference is found, or the empty string

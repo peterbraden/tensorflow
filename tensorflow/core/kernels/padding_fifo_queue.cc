@@ -65,7 +65,15 @@ Status PaddingFIFOQueue::GetElementComponent(
 }
 
 void PaddingFIFOQueue::TryDequeueMany(int num_elements, OpKernelContext* ctx,
+                                      bool allow_small_batch,
                                       CallbackWithTuple callback) {
+  if (allow_small_batch) {
+    ctx->SetStatus(
+        errors::Unimplemented("Dequeue: Queue does not support small batches"));
+    callback(Tuple());
+    return;
+  }
+
   if (num_elements == 0) {
     Tuple tuple;
     tuple.reserve(num_components());
@@ -266,9 +274,8 @@ Status PaddingFIFOQueue::MatchesNodeDef(const NodeDef& node_def) {
   return Status::OK();
 }
 
-template <typename T, int NDIMS>
-Status HandleElementToLargerSlice(const Tensor& element, Tensor* parent,
-                                  int index) {
+static Status ValidateElementToLargerSlice(const Tensor& element,
+                                           Tensor* parent) {
   DCHECK_NE(parent->dim_size(0), 0);
   if (element.NumElements() > (parent->NumElements() / parent->dim_size(0))) {
     TensorShape chip_shape = parent->shape();
@@ -278,6 +285,19 @@ Status HandleElementToLargerSlice(const Tensor& element, Tensor* parent,
         "element is greater than number of elements in parent slice.  ",
         "Shapes are: [element]: ", element.shape().DebugString(),
         ", [parent slice]: ", chip_shape.DebugString());
+  }
+  return Status::OK();
+}
+
+template <typename T, int NDIMS>
+Status HandleElementToLargerSlice(const Tensor& element, Tensor* parent,
+                                  int index) {
+  Status s = ValidateElementToLargerSlice(element, parent);
+  if (!s.ok()) {
+    return s;
+  }
+  if (element.NumElements() == 0) {
+    return Status::OK();
   }
   auto element_t = element.tensor<T, NDIMS>();
   auto parent_t = parent->tensor<T, NDIMS + 1>();

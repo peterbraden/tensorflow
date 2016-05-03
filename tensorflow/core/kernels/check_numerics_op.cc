@@ -24,7 +24,6 @@ limitations under the License.
 #include "tensorflow/core/framework/types.h"
 
 #if GOOGLE_CUDA
-#include "tensorflow/core/common_runtime/gpu_device_context.h"
 #include "tensorflow/core/platform/stream_executor.h"
 #endif  // GOOGLE_CUDA
 namespace tensorflow {
@@ -61,15 +60,14 @@ class CheckNumericsOp<CPUDevice, T> : public OpKernel {
 
     auto in = context->input(0).flat<T>();
     const T* data = in.data();
-    const int size = in.size();
+    const int64 size = in.size();
     // Check to see if any element of the tensor is NaN or Inf.
     int fp_props =
         std::accumulate(data, data + size, 0, [](const int& x, const T& y) {
-          int prop = std::fpclassify(y);
           int result = x;
-          if (prop == FP_INFINITE) {
+          if (Eigen::numext::isinf(y)) {
             result |= kInfBit;
-          } else if (prop == FP_NAN) {
+          } else if (Eigen::numext::isnan(y)) {
             result |= kNaNBit;
           }
           return result;
@@ -122,7 +120,7 @@ class CheckNumericsOp<GPUDevice, T> : public OpKernel {
                                 DT_INT32, TensorShape({abnormal_detected_size}),
                                 &abnormal_detected));
 
-    auto* stream = context->op_device_context<GPUDeviceContext>()->stream();
+    auto* stream = context->op_device_context()->stream();
     OP_REQUIRES(context, stream, errors::Internal("No GPU stream available."));
 
     perftools::gputools::DeviceMemoryBase abnormal_detected_ptr(

@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "tensorflow/core/common_runtime/direct_session.h"
 
+#include <atomic>
 #include <string>
 #include <vector>
 
@@ -22,13 +23,17 @@ limitations under the License.
 #include "tensorflow/core/common_runtime/device_factory.h"
 #include "tensorflow/core/common_runtime/executor.h"
 #include "tensorflow/core/common_runtime/function.h"
+#include "tensorflow/core/common_runtime/gpu/gpu_tracer.h"
 #include "tensorflow/core/common_runtime/graph_optimizer.h"
 #include "tensorflow/core/common_runtime/memory_types.h"
 #include "tensorflow/core/common_runtime/session_factory.h"
 #include "tensorflow/core/common_runtime/simple_placer.h"
+#include "tensorflow/core/common_runtime/step_stats_collector.h"
 #include "tensorflow/core/framework/function.h"
 #include "tensorflow/core/framework/graph.pb.h"
+#include "tensorflow/core/framework/graph.pb_text.h"
 #include "tensorflow/core/framework/graph_def_util.h"
+#include "tensorflow/core/framework/log_memory.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/graph/algorithm.h"
 #include "tensorflow/core/graph/graph.h"
@@ -89,6 +94,8 @@ string GetRendezvousKey(const string& tensor_name,
 
 }  // namespace
 
+std::atomic_int_fast64_t DirectSession::step_id_counter_(1);
+
 // NOTE: On Android with a single device, there is never
 // a risk of an OpKernel blocking indefinitely:
 //
@@ -122,7 +129,8 @@ DirectSession::DirectSession(const SessionOptions& options,
                              const DeviceMgr* device_mgr)
     : options_(options),
       device_mgr_(device_mgr),
-      cancellation_manager_(new CancellationManager()) {
+      cancellation_manager_(new CancellationManager()),
+      operation_timeout_in_ms_(options_.config.operation_timeout_in_ms()) {
   if (options_.config.use_per_session_threads()) {
     thread_pool_ = NewThreadPool(options_);
   } else {
@@ -169,6 +177,9 @@ DirectSession::~DirectSession() {
   delete cancellation_manager_;
   if (options_.config.use_per_session_threads()) {
     delete thread_pool_;
+  }
+  for (auto it : cost_models_) {
+    delete it.second;
   }
 }
 
@@ -248,6 +259,17 @@ Status DirectSession::Run(const NamedTensorList& inputs,
                           const std::vector<string>& output_names,
                           const std::vector<string>& target_nodes,
                           std::vector<Tensor>* outputs) {
+  RunMetadata run_metadata;
+  return Run(RunOptions(), inputs, output_names, target_nodes, outputs,
+             &run_metadata);
+}
+
+Status DirectSession::Run(const RunOptions& run_options,
+                          const NamedTensorList& inputs,
+                          const std::vector<string>& output_names,
+                          const std::vector<string>& target_nodes,
+                          std::vector<Tensor>* outputs,
+                          RunMetadata* run_metadata) {
   {
     mutex_lock l(graph_def_lock_);
     if (!graph_created_) {
@@ -281,25 +303,61 @@ Status DirectSession::Run(const NamedTensorList& inputs,
   const int num_executors = executors_and_keys->items.size();
   ExecutorBarrier* barrier = new ExecutorBarrier(
       num_executors, run_state.rendez, [&run_state](const Status& ret) {
-        run_state.status = ret;
+        {
+          mutex_lock l(run_state.mu_);
+          run_state.status.Update(ret);
+        }
         run_state.executors_done.Notify();
       });
 
   Executor::Args args;
+  args.step_id = step_id_counter_.fetch_add(1);
   args.rendezvous = run_state.rendez;
   args.cancellation_manager = cancellation_manager_;
   args.runner = [this](Executor::Args::Closure c) { SchedClosure(c); };
+  args.session_state = &session_state_;
+  args.tensor_store = &run_state.tensor_store;
+  if (LogMemory::IsEnabled()) {
+    LogMemory::RecordStep(args.step_id, run_state_args.handle);
+  }
+
+  std::unique_ptr<GPUTracer> tracer;
+  if (run_options.trace_level() == RunOptions::FULL_TRACE ||
+      options_.config.graph_options().build_cost_model()) {
+    args.stats_collector = new StepStatsCollector(
+        run_metadata->mutable_step_stats(), &cost_models_);
+    run_state.collector = args.stats_collector;
+    if (tracer && run_options.trace_level() == RunOptions::FULL_TRACE) {
+      tracer.reset(CreateGPUTracer());
+      tracer->Start();
+    }
+  }
 
   for (const auto& item : executors_and_keys->items) {
     item.executor->RunAsync(args, barrier->Get());
   }
 
-  run_state.executors_done.WaitForNotification();
-  TF_RETURN_IF_ERROR(run_state.status);
+  WaitForNotification(&run_state, run_options.timeout_in_ms() > 0
+                                      ? run_options.timeout_in_ms()
+                                      : operation_timeout_in_ms_);
+  if (tracer) {
+    tracer->Stop();
+    tracer->Collect(args.stats_collector);
+  }
+
+  {
+    mutex_lock l(run_state.mu_);
+    TF_RETURN_IF_ERROR(run_state.status);
+  }
 
   // Receive outputs.
   TF_RETURN_IF_ERROR(
       RecvOutputs(output_names, executors_and_keys, &run_state, outputs));
+
+  // Save the output tensors of this run we choose to keep.
+  TF_RETURN_IF_ERROR(
+      run_state.tensor_store.SaveTensors(output_names, &session_state_));
+
   return Status::OK();
 }
 
@@ -329,9 +387,8 @@ Status DirectSession::PRunSetup(const std::vector<string>& input_names,
   {
     mutex_lock l(executor_lock_);
     if (!partial_runs_.insert({run_state_args.handle, run_state}).second) {
-      return errors::Internal("The handle ", run_state_args.handle,
-                              " created for this partial"
-                              " run is not unique.");
+      return errors::Internal("The handle '", run_state_args.handle,
+                              "' created for this partial run is not unique.");
     }
   }
 
@@ -350,9 +407,20 @@ Status DirectSession::PRunSetup(const std::vector<string>& input_names,
       });
 
   Executor::Args args;
+  args.step_id = step_id_counter_.fetch_add(1);
   args.rendezvous = run_state->rendez;
   args.cancellation_manager = cancellation_manager_;
   args.runner = [this](Executor::Args::Closure c) { SchedClosure(c); };
+  args.session_state = &session_state_;
+  args.tensor_store = &run_state->tensor_store;
+  if (LogMemory::IsEnabled()) {
+    LogMemory::RecordStep(args.step_id, run_state_args.handle);
+  }
+
+  if (options_.config.graph_options().build_cost_model()) {
+    run_state->collector = new StepStatsCollector(nullptr, &cost_models_);
+    args.stats_collector = run_state->collector;
+  }
 
   for (auto& item : executors_and_keys->items) {
     Executor* exec = item.executor;
@@ -408,7 +476,7 @@ Status DirectSession::PRun(const string& handle, const NamedTensorList& inputs,
   // Check that this new set of fetches can be computed from all the
   // feeds we have supplied.
   TF_RETURN_IF_ERROR(
-      CheckFetch(inputs, output_names, executors_and_keys->graph, run_state));
+      CheckFetch(inputs, output_names, executors_and_keys, run_state));
 
   // Send inputs.
   Status s = SendInputs(inputs, executors_and_keys, run_state->rendez);
@@ -418,14 +486,22 @@ Status DirectSession::PRun(const string& handle, const NamedTensorList& inputs,
     s = RecvOutputs(output_names, executors_and_keys, run_state, outputs);
   }
 
-  // Delete the run state if there is an error or all fetches are done.
+  // Save the output tensors of this run we choose to keep.
+  if (s.ok()) {
+    s = run_state->tensor_store.SaveTensors(output_names, &session_state_);
+  }
+
   {
     mutex_lock l(executor_lock_);
+    // Delete the run state if there is an error or all fetches are done.
     bool done = true;
     if (s.ok()) {
-      if (!run_state->status.ok()) {
-        LOG(WARNING) << "An error unrelated to this prun has been detected. "
-                     << run_state->status;
+      {
+        mutex_lock l(run_state->mu_);
+        if (!run_state->status.ok()) {
+          LOG(WARNING) << "An error unrelated to this prun has been detected. "
+                       << run_state->status;
+        }
       }
       for (const auto& it : inputs) {
         run_state->pending_inputs.erase(it.first);
@@ -433,10 +509,11 @@ Status DirectSession::PRun(const string& handle, const NamedTensorList& inputs,
       for (const auto& name : output_names) {
         run_state->pending_outputs.erase(name);
       }
-      done = run_state->pending_outputs.size() == 0;
+      done = (run_state->pending_inputs.size() == 0 &&
+              run_state->pending_outputs.size() == 0);
     }
     if (done) {
-      run_state->executors_done.WaitForNotification();
+      WaitForNotification(run_state, operation_timeout_in_ms_);
       partial_runs_.erase(handle);
       delete run_state;
     }
@@ -510,12 +587,10 @@ Status DirectSession::RecvOutputs(const std::vector<string>& output_names,
 
 Status DirectSession::CheckFetch(const NamedTensorList& feeds,
                                  const std::vector<string>& fetches,
-                                 const Graph* graph,
+                                 const ExecutorsAndKeys* executors_and_keys,
                                  const RunState* run_state) {
-  std::unordered_map<StringPiece, Node*, StringPiece::Hasher> name_to_node;
-  for (Node* n : graph->nodes()) {
-    name_to_node[n->name()] = n;
-  }
+  const Graph* graph = executors_and_keys->graph;
+  const NameNodeMap* name_to_node = executors_and_keys->name_to_node;
 
   // Build the set of pending feeds that we haven't seen.
   std::unordered_set<TensorId, TensorId::Hasher> pending_feeds;
@@ -523,8 +598,8 @@ Status DirectSession::CheckFetch(const NamedTensorList& feeds,
     mutex_lock l(executor_lock_);
     for (const string& feed : run_state->pending_inputs) {
       TensorId id(ParseTensorName(feed));
-      auto it = name_to_node.find(id.first);
-      if (it == name_to_node.end()) {
+      auto it = name_to_node->find(id.first);
+      if (it == name_to_node->end()) {
         return errors::NotFound("Feed ", feed, ": not found");
       }
       pending_feeds.insert(id);
@@ -539,8 +614,8 @@ Status DirectSession::CheckFetch(const NamedTensorList& feeds,
   std::vector<const Node*> stack;
   for (const string& fetch : fetches) {
     TensorId id(ParseTensorName(fetch));
-    auto it = name_to_node.find(id.first);
-    if (it == name_to_node.end()) {
+    auto it = name_to_node->find(id.first);
+    if (it == name_to_node->end()) {
       return errors::NotFound("Fetch ", fetch, ": not found");
     }
     stack.push_back(it->second);
@@ -618,25 +693,41 @@ Status DirectSession::GetOrCreateExecutors(
   ek->func_defs = fdefs;
   if (run_state_args->is_partial_run) {
     ek->graph = run_state_args->graph;
+    ek->name_to_node = new NameNodeMap;
+    std::unordered_set<StringPiece, StringPiece::Hasher> names;
+    for (const string& input : inputs) {
+      TensorId id(ParseTensorName(input));
+      names.emplace(id.first);
+    }
+    for (const string& output : outputs) {
+      TensorId id(ParseTensorName(output));
+      names.emplace(id.first);
+    }
+    for (Node* n : run_state_args->graph->nodes()) {
+      if (names.count(n->name()) > 0) {
+        ek->name_to_node->insert({n->name(), n});
+      }
+    }
   }
   ek->items.reserve(graphs.size());
   auto runner = [this](Executor::Args::Closure c) { SchedClosure(c); };
   const auto& optimizer_opts =
       options_.config.graph_options().optimizer_options();
   GraphOptimizer optimizer(optimizer_opts);
-  for (const auto& graph : graphs) {
-    const string& partition_name = graph.first;
-    Graph* partition_graph = graph.second;
+  for (auto iter = graphs.begin(); iter != graphs.end(); ++iter) {
+    const string& partition_name = iter->first;
+    Graph* partition_graph = iter->second;
     const int graph_def_version = partition_graph->versions().producer();
 
     Device* device;
     s = device_mgr_->LookupDevice(partition_name, &device);
-    TF_RETURN_IF_ERROR(s);
+    if (!s.ok()) break;
 
     ek->items.resize(ek->items.size() + 1);
     auto* item = &(ek->items.back());
-    item->flib = NewFunctionLibraryRuntime(device, runner, graph_def_version,
-                                           fdefs, optimizer_opts);
+    item->flib =
+        NewFunctionLibraryRuntime(device_mgr_.get(), device, runner,
+                                  graph_def_version, fdefs, optimizer_opts);
 
     LocalExecutorParams params;
     params.device = device;
@@ -665,17 +756,23 @@ Status DirectSession::GetOrCreateExecutors(
       }
     };
 
-    optimizer.Optimize(lib, &partition_graph);
-    s = ValidateMemoryTypes(DeviceType(device->device_type()), partition_graph);
+    optimizer.Optimize(lib, device, &partition_graph);
+    s = EnsureMemoryTypes(DeviceType(device->device_type()), device->name(),
+                          partition_graph);
     if (!s.ok()) {
-      delete partition_graph;
-      return s;
+      break;
     }
     // NewLocalExecutor takes ownership of *partition_graph.
+    iter->second = nullptr;
+    item->executor = nullptr;
     s = NewLocalExecutor(params, partition_graph, &item->executor);
     if (!s.ok()) {
-      return s;
+      break;
     }
+  }
+  if (!s.ok()) {
+    gtl::STLDeleteValues(&graphs);
+    return s;
   }
 
   // Compute the rendezvous keys to avoid recomputing them every time.
@@ -808,23 +905,28 @@ Status DirectSession::CreateGraphs(gtl::ArraySlice<string> feeds,
     }
   }
 
+  Status s;
   for (auto&& partition : partitions) {
     const string& partition_name = partition.first;
 
     GraphDef* graph_def = &partition.second;
-    VLOG(2) << "Created " << graph_def->DebugString() << " for "
+    VLOG(2) << "Created " << ProtoDebugString(*graph_def) << " for "
             << partition_name;
 
     // Give the device an opportunity to rewrite its subgraph.
     Device* d;
-    TF_RETURN_IF_ERROR(device_mgr_->LookupDevice(partition_name, &d));
+    s = device_mgr_->LookupDevice(partition_name, &d);
+    if (!s.ok()) break;
     {
       mutex_lock l(graph_def_lock_);
       // TODO(pbar) The library is currently shared and immutable. There
       // may be possible use cases where a device may want to modify
       // function definitions - in which case the library would need to be
       // replicated per device.
-      TF_RETURN_IF_ERROR(d->MaybeRewriteGraph(graph_def_.library(), graph_def));
+      s = d->MaybeRewriteGraph(graph_def_.library(), graph_def);
+      if (!s.ok()) {
+        break;
+      }
     }
     Graph* device_graph = new Graph(fdefs.get());
     GraphConstructorOptions device_opts;
@@ -832,14 +934,17 @@ Status DirectSession::CreateGraphs(gtl::ArraySlice<string> feeds,
     // allow.
     device_opts.allow_internal_ops = true;
     device_opts.expect_device_spec = true;
-    Status s = ConvertGraphDefToGraph(device_opts, *graph_def, device_graph);
+    s = ConvertGraphDefToGraph(device_opts, *graph_def, device_graph);
     if (!s.ok()) {
       delete device_graph;
-      // Also delete other graphs created during the loop.
-      gtl::STLDeleteValues(outputs);
-      return s;
+      break;
     }
     outputs->insert(std::make_pair(partition_name, device_graph));
+  }
+  if (!s.ok()) {
+    // Also delete other graphs created during the loop.
+    gtl::STLDeleteValues(outputs);
+    return s;
   }
   *func_defs = fdefs.release();
   return Status::OK();
@@ -848,6 +953,42 @@ Status DirectSession::CreateGraphs(gtl::ArraySlice<string> feeds,
 ::tensorflow::Status DirectSession::Close() {
   cancellation_manager_->StartCancel();
   return ::tensorflow::Status::OK();
+}
+
+DirectSession::RunState::~RunState() {
+  if (rendez != nullptr) {
+    if (!executors_done.HasBeenNotified()) {
+      rendez->StartAbort(errors::Cancelled("PRun cancellation"));
+      executors_done.WaitForNotification();
+    }
+    rendez->Unref();
+  }
+  if (collector != nullptr) {
+    delete collector;
+  }
+}
+
+void DirectSession::WaitForNotification(RunState* run_state,
+                                        int64 timeout_in_ms) {
+  if (timeout_in_ms > 0) {
+    bool timed_out =
+        run_state->executors_done.WaitForNotificationWithTimeout(timeout_in_ms);
+    if (timed_out) {
+      {
+        mutex_lock l(run_state->mu_);
+        run_state->status.Update(Status(error::DEADLINE_EXCEEDED,
+                                        "Timed out waiting for notification"));
+      }
+      // TODO(sherrym): This cancels all steps in the session, even ones that
+      // have not exceeded their deadline. An alternative would be to use a
+      // two-level cancellation manager with a Session-global one containing
+      // several step-local ones. Probably the RunState should have its own
+      // CancellationManager.
+      cancellation_manager_->StartCancel();
+    }
+  } else {
+    run_state->executors_done.WaitForNotification();
+  }
 }
 
 class DirectSessionFactory : public SessionFactory {
