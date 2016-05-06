@@ -11,7 +11,7 @@
   },
   "scripts": {
     "generate": "./generate.sh",
-    "install": "node-gyp --build_dir=node_build --verbose rebuild",
+    "install": "node-gyp --build_dir=node_build clean && ./prebuild.sh && node-gyp --build_dir=node_build --verbose configure && node-gyp --build_dir=node_build --verbose build && ./postbuild.sh",
     "test": "node test/suite.js"
   },
   "license": "Apache-2.0"
