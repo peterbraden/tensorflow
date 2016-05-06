@@ -1,3 +1,4 @@
+%include "./session.i"
 
 %{
 #include "tensorflow/core/public/version.h"

@@ -3,7 +3,15 @@
     'target_name': 'tensorflow', 
     'sources': ['generated/tensorflow_wrap.cxx'],
     
-    'libraries' : [],
+    'link_settings': {
+      'libraries': [
+          "-ltensorflow"
+        ],
+      'ldflags': [
+          "-L<!(python -c 'import os,sys; print os.path.realpath(sys.argv[1])' ../../../../tensorflow/bazel-bin/tensorflow)"
+          "-Wl,-rpath,../../../../tensorflow/bazel-bin/tensorflow",
+        ]
+    },
 
     'include_dirs' : [ 
 
@@ -23,6 +31,7 @@
           ],
           "OTHER_LDFLAGS": [
             '-stdlib=libc++',
+            "-L<!(python -c 'import os,sys; print os.path.realpath(sys.argv[1])' ../../../../tensorflow/bazel-bin/tensorflow)"
           ],
           "OTHER_CPLUSPLUSFLAGS": [
             '-std=c++11',
