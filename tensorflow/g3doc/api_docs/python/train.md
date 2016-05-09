@@ -305,7 +305,7 @@ Construct a new gradient descent optimizer.
 Optimizer that implements the Adadelta algorithm. 
 
 See [M. D. Zeiler](http://arxiv.org/abs/1212.5701)
-([pdf](http://arxiv.org/pdf/1212.570.pdf))
+([pdf](http://arxiv.org/pdf/1212.5701.pdf))
 
 - - -
 
@@ -1588,6 +1588,11 @@ override any information provided in `server_or_cluster_def`.
 *  <b>`start`</b>: (Optional.) Boolean, indicating whether to start the server
     after creating it. Defaults to `True`.
 
+##### Raises:
+
+  tf.errors.OpError: Or one of its subclasses if an error occurs while
+    creating the TensorFlow server.
+
 
 - - -
 
@@ -1639,6 +1644,11 @@ with tf.Session(server.target):
 
 Starts this server.
 
+##### Raises:
+
+  tf.errors.OpError: Or one of its subclasses if an error occurs while
+    starting the TensorFlow server.
+
 
 - - -
 
@@ -1647,6 +1657,11 @@ Starts this server.
 Blocks until the server has shut down.
 
 This method currently blocks forever.
+
+##### Raises:
+
+  tf.errors.OpError: Or one of its subclasses if an error occurs while
+    joining the TensorFlow server.
 
 
 

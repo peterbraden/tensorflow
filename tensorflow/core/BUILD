@@ -15,6 +15,7 @@
 # ":framework" - exports the public non-test headers for:
 #     util/: General low-level TensorFlow-specific libraries
 #     framework/: Support for adding new ops & kernels
+#     example/: Wrappers to simplify access to Example proto
 # ":ops" - defines TensorFlow ops, but no implementations / kernels
 #     ops/: Standard ops
 #     user_ops/: User-supplied ops
@@ -241,6 +242,7 @@ cc_library(
 tf_cuda_library(
     name = "framework",
     hdrs = [
+        "example/feature_util.h",
         "framework/allocator.h",
         "framework/attr_value_util.h",
         "framework/bfloat16.h",
@@ -281,7 +283,6 @@ tf_cuda_library(
         "framework/types.h",
         "public/version.h",
         "util/bcast.h",
-        "util/checkpoint_reader.h",
         "util/cuda_kernel_helper.h",
         "util/device_name_utils.h",
         "util/events_writer.h",
@@ -449,6 +450,8 @@ tf_cuda_library(
         "public/session.h",
         "public/session_options.h",
         "public/tensor_c_api.h",
+        "util/checkpoint_reader.h",
+        "util/tf_status_helper.h",
     ],
     visibility = ["//visibility:public"],
     deps = [
@@ -593,6 +596,7 @@ filegroup(
         "//tensorflow/core/kernels:android_srcs",
         "//tensorflow/core/util/ctc:android_srcs",
         "common_runtime/gpu/gpu_tracer.cc",
+        "common_runtime/gpu/gpu_tracer.h",
     ] + glob(
         [
             "client/**/*.cc",
@@ -604,8 +608,6 @@ filegroup(
             "graph/**/*.cc",
             "lib/**/*.h",
             "lib/**/*.cc",
-            "platform/*.h",
-            "platform/*.cc",
             "platform/**/*.h",
             "platform/**/*.cc",
             "public/**/*.h",
@@ -617,51 +619,23 @@ filegroup(
             "**/*testutil*",
             "**/*testlib*",
             "**/*main.cc",
-            "lib/jpeg/*.h",
-            "lib/jpeg/*.cc",
-            "lib/png/*.h",
-            "lib/png/*.cc",
-            "util/events_writer.cc",
-            "util/events_writer.h",
-            # Exclude all protobuf/google headers except protobuf_android.h
+            "lib/jpeg/**/*",
+            "lib/png/**/*",
+            "util/events_writer.*",
+            "util/tf_status_helper.*",
+            "util/checkpoint_reader.*",
+            "platform/default/stream_executor.*",
             "platform/cuda.h",
-            "platform/default/stream_executor.h",
-            "platform/google/cord_coding.h",
-            "platform/google/dynamic_annotations.h",
-            "platform/google/integral_types.h",
-            "platform/google/mutex.h",
-            "platform/google/protobuf.h",
-            "platform/google/stream_executor.h",
-            "platform/google/tracing_impl.h",
-            "platform/google/*.cc",
-            "platform/google/test_benchmark.cc",
-            "platform/google/test_benchmark.h",
-            "platform/jpeg.h",
-            "platform/stream_executor.h",
+            "platform/google/**/*",
+            "platform/jpeg.*",
+            "platform/stream_executor.*",
             "user_ops/**/*.cu.cc",
-            "common_runtime/gpu/*.cc",
-            "common_runtime/gpu/pool_allocator.h",
-            "common_runtime/gpu/gpu_bfc_allocator.h",
-            "common_runtime/gpu/gpu_debug_allocator.h",
-            "common_runtime/gpu/gpu_device.h",
-            "common_runtime/gpu/gpu_util.h",
-            "common_runtime/gpu/gpu_event_mgr.h",
-            "common_runtime/gpu_device_factory.cc",
+            "common_runtime/gpu/**/*",
+            "common_runtime/gpu_device_factory.*",
         ],
     ),
     visibility = ["//visibility:public"],
 )
-
-ANDROID_TF_LITE_HDRS = [
-    "framework/tensor.h",
-    "platform/default/integral_types.h",
-    "platform/env.h",
-    "platform/file_system.h",
-    "platform/logging.h",
-    "platform/platform.h",
-    "platform/types.h",
-    "public/session.h",
-] + proto_text_hdrs_and_srcs.hdrs
 
 # Native library support for Android applications.
 # Does not contain operators, use :android_tensorflow_lib if you want full
@@ -674,6 +648,9 @@ ANDROID_TF_LITE_HDRS = [
 # --crosstool_top=//external:android/crosstool \
 # --cpu=armeabi-v7a \
 # --host_crosstool_top=@bazel_tools//tools/cpp:toolchain
+#
+# Layering checks are explicitly disabled since hdrs are not used to
+# verify Android builds, which leads to incorrect and misleading header lists.
 cc_library(
     name = "android_tensorflow_lib_lite",
     srcs =
@@ -683,8 +660,8 @@ cc_library(
             ],
             "//conditions:default": [],
         }),
-    hdrs = ANDROID_TF_LITE_HDRS,
     copts = tf_copts() + ["-Os"],
+    features = ["-layering_check"],
     tags = [
         "manual",
         "notap",
@@ -709,6 +686,7 @@ cc_library(
         "//conditions:default": [],
     }),
     copts = tf_copts(),
+    features = ["-layering_check"],
     tags = [
         "manual",
         "notap",
@@ -829,6 +807,8 @@ tf_cuda_library(
     name = "framework_internal",
     srcs = glob(
         [
+            "example/**/*.h",
+            "example/**/*.cc",
             "framework/**/*.h",
             "framework/**/*.cc",
             "public/version.h",
@@ -838,6 +818,8 @@ tf_cuda_library(
         exclude = [
             "**/*test*",
             "**/*main.cc",
+            "util/tf_status_helper.*",
+            "util/checkpoint_reader.*",
             "util/reporter.h",
             "util/reporter.cc",
             "framework/fake_input.*",
@@ -980,6 +962,8 @@ tf_cuda_library(
             "public/session_options.h",
             "public/tensor_c_api.h",
             "public/version.h",
+            "util/tf_status_helper.*",
+            "util/checkpoint_reader.*",
         ],
         exclude = [
             "**/*test*",
@@ -1229,6 +1213,7 @@ tf_cc_tests(
         [
             "client/**/*_test.cc",
             "common_runtime/**/*_test.cc",
+            "example/**/*_test.cc",
             "framework/**/*_test.cc",
             "graph/**/*_test.cc",
             "util/**/*_test.cc",

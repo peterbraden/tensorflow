@@ -52,6 +52,7 @@
   * [`constant`](../../api_docs/python/constant_op.md#constant)
   * [`fill`](../../api_docs/python/constant_op.md#fill)
   * [`linspace`](../../api_docs/python/constant_op.md#linspace)
+  * [`multinomial`](../../api_docs/python/constant_op.md#multinomial)
   * [`ones`](../../api_docs/python/constant_op.md#ones)
   * [`ones_like`](../../api_docs/python/constant_op.md#ones_like)
   * [`random_crop`](../../api_docs/python/constant_op.md#random_crop)
@@ -540,6 +541,7 @@
   * [`extract_pandas_labels`](../../api_docs/python/contrib.learn.md#extract_pandas_labels)
   * [`extract_pandas_matrix`](../../api_docs/python/contrib.learn.md#extract_pandas_matrix)
   * [`infer`](../../api_docs/python/contrib.learn.md#infer)
+  * [`NanLossDuringTrainingError`](../../api_docs/python/contrib.learn.md#NanLossDuringTrainingError)
   * [`run_feeds`](../../api_docs/python/contrib.learn.md#run_feeds)
   * [`run_n`](../../api_docs/python/contrib.learn.md#run_n)
   * [`RunConfig`](../../api_docs/python/contrib.learn.md#RunConfig)
@@ -559,4 +561,9 @@
   * [`make_ndarray`](../../api_docs/python/contrib.util.md#make_ndarray)
   * [`make_tensor_proto`](../../api_docs/python/contrib.util.md#make_tensor_proto)
   * [`stripped_op_list_for_graph`](../../api_docs/python/contrib.util.md#stripped_op_list_for_graph)
+
+* **[Copying Graph Elements (contrib)](../../api_docs/python/contrib.copy_graph.md)**:
+  * [`copy_op_to_graph`](../../api_docs/python/contrib.copy_graph.md#copy_op_to_graph)
+  * [`copy_variable_to_graph`](../../api_docs/python/contrib.copy_graph.md#copy_variable_to_graph)
+  * [`get_copied_op`](../../api_docs/python/contrib.copy_graph.md#get_copied_op)
 

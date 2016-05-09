@@ -7,8 +7,7 @@ writing TensorFlow programs.
 
 ## Hello distributed TensorFlow!
 
-This tutorial assumes that you are using a TensorFlow nightly build. You
-can test your installation by starting and using a local server as follows:
+ To see a simple TensorFlow cluster in action, execute the following:
 
 ```shell
 # Start a TensorFlow server as a single-process "cluster".
@@ -200,7 +199,7 @@ FLAGS = tf.app.flags.FLAGS
 
 def main(_):
   ps_hosts = FLAGS.ps_hosts.split(",")
-  worker_hosts = FLAGS.worker_hosts(",")
+  worker_hosts = FLAGS.worker_hosts.split(",")
 
   # Create a cluster from the parameter server and worker hosts.
   cluster = tf.train.ClusterSpec({"ps": ps_hosts, "worker": worker_hosts})

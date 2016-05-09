@@ -1300,6 +1300,24 @@ class Operation(object):
     tensor._add_consumer(self)  # pylint: disable=protected-access
     self._recompute_node_def()
 
+  def _add_control_inputs(self, ops):
+    """Add a list of new control inputs to this operation.
+
+    Args:
+      ops: the list of Operations to add as control input.
+
+    Raises:
+      TypeError: if ops is not a list of Operations.
+      ValueError: if any op in ops is from a different graph.
+    """
+    if ops:
+      for op in ops:
+        if not isinstance(op, Operation):
+          raise TypeError("op must be an Operation: %s" % op)
+        _assert_same_graph(self, op)
+        self._control_inputs.append(op)
+      self._recompute_node_def()
+
   def _add_control_input(self, op):
     """Add a new control input to this operation.
 
@@ -1310,11 +1328,7 @@ class Operation(object):
       TypeError: if op is not an Operation.
       ValueError: if op is from a different graph.
     """
-    if not isinstance(op, Operation):
-      raise TypeError("op must be an Operation: %s" % op)
-    _assert_same_graph(self, op)
-    self._control_inputs.append(op)
-    self._recompute_node_def()
+    self._add_control_inputs([op])
 
   # Methods below are used when building the NodeDef and Graph proto.
   def _recompute_node_def(self):
@@ -2012,6 +2026,7 @@ class Graph(object):
       if from_version is None or op_id > from_version:
         graph.node.extend([op.node_def])
         if op.outputs and add_shapes:
+          assert "_output_shapes" not in graph.node[-1].attr
           graph.node[-1].attr["_output_shapes"].list.shape.extend([
               output.get_shape().as_proto() for output in op.outputs])
         bytesize += op.node_def.ByteSize()
