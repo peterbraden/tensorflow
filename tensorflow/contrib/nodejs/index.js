@@ -16,6 +16,11 @@ module.exports.createSession = function(){
 
   tf.checkOk(status)
 
+  sess.run = function(tensor) {
+    
+  }
+
+
   return sess
 }
 

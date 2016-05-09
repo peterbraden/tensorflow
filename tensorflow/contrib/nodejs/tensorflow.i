@@ -1,6 +1,8 @@
 %{
 #include "tensorflow/core/public/version.h"
 #include "tensorflow/core/public/tensor_c_api.h"
+#include "tensorflow/core/platform/env.h"
+#include "tensorflow/core/public/session.h"
 
 extern const char version[] = TF_VERSION_STRING;
 
